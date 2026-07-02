@@ -4,6 +4,16 @@
 **Members:** Vaibhav Sharma (Lead) · Shreya Khantal  
 **Challenge:** Redrob Hackathon 2026 — Track 1: Intelligent Candidate Ranking
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://india-runs.streamlit.app)
+
+---
+
+## 🚀 Live Demo
+
+**Streamlit App:** [india-runs.streamlit.app](https://india-runs.streamlit.app)
+
+Upload a sample JSONL/JSON file and run the full two-stage ranking pipeline in your browser. The demo uses the bundled `data/sample_candidates.json` for a quick test run (no upload required in the Quick Demo tab).
+
 ---
 
 ## Quick Start
@@ -19,7 +29,7 @@ python precompute.py \
   --candidates ./candidates.jsonl \
   --jd ./job_description.docx
 ```
-This downloads the embedding model locally and pre-computes all 100K candidate embeddings. After this step, no network access is needed.
+This downloads the embedding model locally and pre-computes all 100K candidate embeddings. After this step, **no network access is needed** during ranking.
 
 ### Step 3 — Rank candidates (~3 minutes, no network)
 ```bash
@@ -31,7 +41,12 @@ python rank.py \
 
 ### Step 4 — Validate submission
 ```bash
-python validate_submission.py ./submission.csv
+python validate_submission.py submission.csv
+```
+
+### Step 5 — Run Streamlit demo locally
+```bash
+streamlit run app.py
 ```
 
 ---
@@ -60,24 +75,26 @@ candidates.jsonl (100K)
 │  • 90% fusion + 10% semantic similarity          │
 │  • Honeypot penalty enforcement                  │
 │  • Score calibration to [0,1] + monotonic        │
+│  • Tie-break: equal scores → candidate_id asc   │
 │  • Template-based factual reasoning              │
 └──────────────────────┬────────────────────────────┘
                        │
                        ▼
         submission.csv (top 100 candidates)
+        candidate_id | rank | score | reasoning
 ```
 
 ### The 7 Signals
 
-| # | Signal | Description |
-|---|--------|-------------|
-| 1 | `title_career` | Title match, production evidence, product vs services company |
-| 2 | `skill_depth` | Trust-weighted skill score (endorsements × duration × proficiency × JD multiplier) |
-| 3 | `experience` | Years-of-experience fit for the [5-9] target band |
-| 4 | `education` | Institution tier (Tier-1/2/3) + field relevance + degree level |
-| 5 | `location` | Preferred city match (Pune/Noida=1.0, NCR=0.85) + relocation willingness |
-| 6 | `behavioral` | Availability gate (open_to_work + ≤60d active + >10% response) + engagement score |
-| 7 | `honeypot_penalty` | Timeline impossibility, skill inflation, company age mismatch, salary anomalies |
+| # | Signal | Description | Weight |
+|---|--------|-------------|--------|
+| 1 | `title_career` | Title match, production evidence, product vs services company | 25% |
+| 2 | `skill_depth` | Trust-weighted skill score (endorsements × duration × proficiency × JD multiplier) | 20% |
+| 3 | `experience` | Years-of-experience fit for the [5-9] target band | 15% |
+| 4 | `education` | Institution tier (Tier-1/2/3) + field relevance + degree level | 10% |
+| 5 | `location` | Preferred city match (Pune/Noida=1.0, NCR=0.85) + relocation willingness | 5% |
+| 6 | `behavioral` | Availability gate (open_to_work + ≤60d active + >10% response) + engagement | 15% |
+| 7 | `honeypot_penalty` | Timeline impossibility, skill inflation, company age mismatch, salary anomalies | -15% |
 
 ### Honeypot Detection
 
@@ -93,40 +110,11 @@ Our system detects them through:
 
 ### Reasoning Quality
 
-All reasoning strings are template-filled from verified candidate fields only — no LLM inference, no hallucination. Each string includes:
+All reasoning strings are template-filled from verified candidate fields only — **no LLM inference, no hallucination**. Each string includes:
 - Title / Company / Company type / Years of experience
-- Specific tech evidence from career descriptions
-- Behavioral signal (last active, response rate, GitHub)
+- Specific tech evidence from career descriptions (FAISS, NDCG, etc.)
+- Behavioral signal (last active, response rate, GitHub activity)
 - Up to 3 specific concerns (notice period, services background, location)
-
----
-
-## File Structure
-
-```
-Implementation/
-├── rank.py                      # Main CLI entry point
-├── precompute.py                # One-time pre-computation script
-├── app.py                       # Streamlit demo app
-├── validate_submission.py       # Local submission validator (copy from Dataset/)
-├── requirements.txt
-├── submission_metadata.yaml
-├── README.md
-├── src/
-│   └── ranker/
-│       ├── __init__.py
-│       ├── __main__.py          # Pipeline orchestrator
-│       ├── candidate_loader.py  # JSONL/JSON/GZ reader
-│       ├── signals.py           # 7-signal extractor
-│       ├── embeddings.py        # Offline-first embedding manager
-│       ├── jd_parser.py         # JD requirements parser
-│       ├── fusion.py            # LogisticRegression fusion + calibration
-│       └── reasoning.py         # Template-based reasoning generator
-└── models/
-    ├── embedding_model/         # Saved sentence-transformers model (offline)
-    ├── embeddings/              # Pre-computed candidate embeddings (gitignored)
-    └── fusion/                  # Trained fusion model (committed, ~2KB)
-```
 
 ---
 
@@ -140,20 +128,49 @@ Implementation/
 | < 16 GB RAM | ✅ ~4 GB peak (100K × 384-dim float32 embeddings) |
 | Exactly 100 rows | ✅ Hard-enforced |
 | Ranks 1–100, unique | ✅ Validated |
-| Scores non-increasing | ✅ Monotonic enforcement + validation |
-| Tie-break by candidate_id ascending | ✅ Implemented |
+| Scores non-increasing | ✅ Monotonic enforcement + final sweep |
+| Tie-break by candidate_id ascending | ✅ Final stable sort enforces this |
+| CAND_XXXXXXX format | ✅ Validated |
 
 ---
 
-## Sandbox / Demo
+## File Structure
 
-The Streamlit app supports uploading any sample JSONL/JSON/GZ file (up to ~1000 candidates works best for demo) and runs the full pipeline end-to-end.
-
-```bash
-streamlit run app.py
 ```
-
-Or hosted at: [Streamlit Cloud Link]
+Implementation/
+├── rank.py                      # Main CLI entry point
+├── precompute.py                # One-time pre-computation script
+├── app.py                       # Streamlit demo app (4 tabs)
+├── validate_submission.py       # Submission format validator
+├── requirements.txt             # Full requirements (with CPU torch)
+├── requirements_cloud.txt       # Streamlit Cloud requirements
+├── pyproject.toml               # Python project config
+├── submission_metadata.yaml     # Team and approach metadata
+├── README.md                    # This file
+├── .streamlit/
+│   └── config.toml              # Streamlit theme (dark mode)
+├── data/
+│   ├── job_description.md       # JD text (used on Streamlit Cloud)
+│   └── sample_candidates.json  # 50-candidate sample for demo
+├── src/
+│   └── ranker/
+│       ├── __init__.py
+│       ├── __main__.py          # Pipeline orchestrator (Ranker class)
+│       ├── candidate_loader.py  # JSONL/JSON/GZ reader & Candidate dataclass
+│       ├── signals.py           # 7-signal extractor + SignalScores
+│       ├── embeddings.py        # Offline-first embedding manager
+│       ├── jd_parser.py         # JD requirements parser
+│       ├── fusion.py            # LR + IsotonicRegression fusion
+│       └── reasoning.py         # Template-based reasoning generator
+└── models/
+    ├── embedding_model/         # Saved sentence-transformers model (offline)
+    ├── embeddings/              # Pre-computed candidate embeddings (gitignored)
+    └── fusion/                  # Trained fusion model (~2KB, committed)
+        ├── fusion_model.pkl
+        ├── scaler.pkl
+        ├── calibrator.pkl
+        └── weights.npy
+```
 
 ---
 
