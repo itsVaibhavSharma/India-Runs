@@ -256,7 +256,7 @@ class Ranker:
         final_scores     = np.array([combined_scores[i] for i in final_order], dtype=np.float64)
         final_signals    = [stage2_signals[i] for i in final_order]
 
-        # Enforce monotonically non-increasing scores
+        # Enforce monotonically non-increasing scores (should already be so, but guard)
         for i in range(1, len(final_scores)):
             if final_scores[i] > final_scores[i - 1]:
                 final_scores[i] = final_scores[i - 1]
@@ -299,8 +299,12 @@ class Ranker:
             seen_ids = {r["candidate_id"] for r in rows}
             pad_rank = len(rows) + 1
 
-            # Ensure last score is available for stepping
-            base_score = rows[-1]["score"] if rows else 0.050
+            # Use last scored row's score as base (avoid 0.0 which causes inversions)
+            # Find the last non-zero score, or use a small default
+            last_nonzero = next(
+                (r["score"] for r in reversed(rows) if r["score"] > 0), 0.010
+            )
+            base_score = max(0.001, last_nonzero)
 
             # Build a quick score for ALL remaining candidates using signal extraction
             remaining = [c for c in all_candidates if c.candidate_id not in seen_ids]
@@ -319,32 +323,52 @@ class Ranker:
                         sig.behavioral    * 0.10 -
                         sig.honeypot_penalty * 0.15
                     )
-                    scored_remaining.append((quick, cand, sig.to_dict()))
+                    scored_remaining.append((quick, cand.candidate_id, cand, sig.to_dict()))
                 except Exception:
-                    scored_remaining.append((0.0, cand, {}))
+                    scored_remaining.append((0.0, cand.candidate_id, cand, {}))
 
-            # Sort by descending quick score
-            scored_remaining.sort(key=lambda x: -x[0])
+            # Sort by descending quick score, then by candidate_id ascending (tie-break)
+            scored_remaining.sort(key=lambda x: (-x[0], x[1]))
 
-            for quick_score, cand, sig_dict in scored_remaining:
-                if pad_rank > final_top_k:
-                    break
+            # Pre-calculate strictly decreasing unique scores for all padding candidates
+            # Use linear interpolation from base_score down to ~0.000001
+            n_remaining = len(scored_remaining)
+            n_needed = min(n_remaining, final_top_k - len(rows))
+            if n_needed > 0:
+                # Distribute scores linearly: base_score down to 0.000001
+                step_size = (base_score - 0.000001) / max(n_needed, 1)
+                for idx, (_, _, cand, sig_dict) in enumerate(scored_remaining[:n_needed]):
+                    pad_score = round(base_score - (idx + 1) * step_size, 6)
+                    pad_score = max(0.000001, pad_score)
+                    # Safety: ensure strictly <= previous score
+                    if rows:
+                        pad_score = min(pad_score, rows[-1]["score"])
+                    pad_score = max(0.000001, pad_score)
 
-                # Ensure score is monotonically decreasing from last row
-                step = (pad_rank - len(rows))
-                pad_score = round(base_score * max(0.90 ** step, 0.0001), 6)
-                pad_score = max(0.000001, pad_score)
+                    reasoning = generate_reasoning(cand, sig_dict, pad_rank, pad_score, self.jd_requirements)
 
-                reasoning = generate_reasoning(cand, sig_dict, pad_rank, pad_score, self.jd_requirements)
+                    rows.append({
+                        "candidate_id": cand.candidate_id,
+                        "rank": pad_rank,
+                        "score": pad_score,
+                        "reasoning": reasoning,
+                    })
+                    seen_ids.add(cand.candidate_id)
+                    pad_rank += 1
 
-                rows.append({
-                    "candidate_id": cand.candidate_id,
-                    "rank": pad_rank,
-                    "score": pad_score,
-                    "reasoning": reasoning,
-                })
-                seen_ids.add(cand.candidate_id)
-                pad_rank += 1
+        # ── Final monotonicity sweep over ALL rows (including padding) ──────
+        for i in range(1, len(rows)):
+            if rows[i]["score"] > rows[i - 1]["score"]:
+                rows[i]["score"] = rows[i - 1]["score"]
+
+        # ── Enforce tie-break: equal scores → candidate_id ascending ────────
+        # Sort by (score descending, candidate_id ascending) — stable sort preserves
+        # existing order within groups, but re-sorts equal-score candidates by ID.
+        rows = sorted(rows, key=lambda r: (-r["score"], r["candidate_id"]))
+
+        # Re-assign ranks 1..N sequentially after the sort
+        for i, row in enumerate(rows, start=1):
+            row["rank"] = i
 
         # Cap to exactly final_top_k rows and write CSV
         rows = rows[:final_top_k]
