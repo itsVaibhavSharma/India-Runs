@@ -1,16 +1,15 @@
 """Main Ranker - Orchestrates the two-stage ranking pipeline."""
 
-import argparse
 import csv
 import logging
 import time
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any
 import numpy as np
 from tqdm import tqdm
 
-from .jd_parser import JDParser, parse_jd
-from .candidate_loader import CandidateLoader, Candidate
+from .jd_parser import parse_jd
+from .candidate_loader import CandidateLoader
 from .signals import SignalExtractor
 from .embeddings import EmbeddingManager
 from .fusion import SignalFusion
@@ -21,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 class Ranker:
-    STAGE1_TOP_K = 500
-    FINAL_TOP_K = 100
-
     def __init__(self, jd_path: str, candidates_path: str, cache_dir: str = 'models'):
         self.jd_path = jd_path
         self.candidates_path = candidates_path
@@ -36,7 +32,9 @@ class Ranker:
         self.candidate_embeddings = None
         self.candidate_ids = None
 
-    def run(self, output_path: str, force_recompute: bool = False):
+    def run(self, output_path: str, force_recompute: bool = False,
+            stage1,
+            final_top_k: int = 100, stage1_top_k: int = 500):
         start_time = time.time()
         logger.info("=" * 60)
         logger.info("Starting Redrob Candidate Ranking Pipeline")
@@ -79,7 +77,7 @@ class Ranker:
             signals = signal_extractor.extract_all_signals(candidate)
             # Apply behavioral gate early
             if signals.behavioral == 0.0 and signals.honeypot_penalty < 0.5:
-                continue  # Skip unavailable candidates unless they have low honeypot penalty
+                continue
 
             signal_dict = {
                 'title_career': signals.title_career,
@@ -102,9 +100,8 @@ class Ranker:
             self.jd_embedding, self.candidate_embeddings
         )
 
-        # Get top K by similarity from valid candidates
         valid_similarities = similarities[candidate_indices]
-        top_k = min(self.STAGE1_TOP_K, len(valid_similarities))
+        top_k = min(stage1_top_k, len(valid_similarities))
         top_indices = np.argpartition(valid_similarities, -top_k)[-top_k:]
         top_indices = top_indices[np.argsort(valid_similarities[top_indices])[::-1]]
 
@@ -133,14 +130,14 @@ class Ranker:
             if signals['honeypot_penalty'] > 0.3:
                 combined_scores[i] *= (1.0 - signals['honeypot_penalty'])
             if signals['honeypot_penalty'] > 0.5:
-                combined_scores[i] *= 0.1  # Heavy penalty for strong honeypots
+                combined_scores[i] *= 0.1
 
         # Stage 5: Sort and generate output
         logger.info("Stage 5: Sorting and generating output...")
         ranked_indices = np.argsort(combined_scores)[::-1]
-        final_candidates = [stage2_candidates[i] for i in ranked_indices[:self.FINAL_TOP_K]]
-        final_scores = combined_scores[ranked_indices[:self.FINAL_TOP_K]]
-        final_signals = [stage2_signals[i] for i in ranked_indices[:self.FINAL_TOP_K]]
+        final_candidates = [stage2_candidates[i] for i in ranked_indices[:final_top_k]]
+        final_scores = combined_scores[ranked_indices[:final_top_k]]
+        final_signals = [stage2_signals[i] for i in ranked_indices[:final_top_k]]
 
         # Enforce monotonic scores
         final_scores = np.maximum.accumulate(final_scores[::-1])[::-1]
@@ -191,18 +188,36 @@ class Ranker:
             writer.writerows(rows)
 
 
+def run_ranking(candidates_path: str, jd_path: str, output_path: str,
+                cache_dir: str = 'models', force_recompute: bool = False,
+                final_top_k: int = 100, stage1_top_k: int = 500):
+    """Entry point for programmatic use."""
+    ranker = Ranker(jd_path, candidates_path, cache_dir)
+    ranker.run(output_path, force_recompute, final_top_k, stage1_top_k)
+
+
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description='Redrob Candidate Ranker')
     parser.add_argument('--candidates', required=True, help='Path to candidates.jsonl or .gz')
     parser.add_argument('--jd', default='../Dataset/job_description.docx', help='Path to job description')
     parser.add_argument('--out', required=True, help='Output CSV path')
     parser.add_argument('--force-recompute', action='store_true', help='Force recompute embeddings')
     parser.add_argument('--cache-dir', default='models', help='Cache directory')
+    parser.add_argument('--top-k', type=int, default=100, help='Number of candidates to rank')
+    parser.add_argument('--stage1-k', type=int, default=500, help='Stage 1 candidates to advance')
 
     args = parser.parse_args()
 
-    ranker = Ranker(args.jd, args.candidates, args.cache_dir)
-    ranker.run(args.out, force_recompute=args.force_recompute)
+    run_ranking(
+        candidates_path=args.candidates,
+        jd_path=args.jd,
+        output_path=args.out,
+        cache_dir=args.cache_dir,
+        force_recompute=args.force_recompute,
+        final_top_k=args.top_k,
+        stage1_top_k=args.stage1_k
+    )
 
 
 if __name__ == '__main__':
