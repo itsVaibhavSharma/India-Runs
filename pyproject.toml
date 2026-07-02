@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "redrob-ranker"
+version = "1.0.0"
+description = "Intelligent Candidate Discovery & Ranking — Redrob Hackathon 2026"
+authors = [
+    { name = "Vaibhav Sharma" },
+    { name = "Shreya Khantal" },
+]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["ranking", "information-retrieval", "embeddings", "candidate-ranking"]
+
+dependencies = [
+    "numpy>=1.26.0,<2.0",
+    "scikit-learn>=1.4.0,<2.0",
+    "sentence-transformers==3.0.1",
+    "transformers>=4.40.0",
+    "tokenizers>=0.19.0",
+    "huggingface-hub>=0.23.0",
+    "pandas>=2.1.0",
+    "tqdm>=4.66.0",
+    "python-docx>=1.1.0",
+    "PyYAML>=6.0.1",
+    "streamlit>=1.30.0",
+    "plotly>=5.20.0",
+]
+
+[project.scripts]
+rank = "ranker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[project.urls]
+Repository = "https://github.com/itsVaibhavSharma/India-Runs"
