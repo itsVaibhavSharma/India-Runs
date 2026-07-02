@@ -123,9 +123,13 @@ dmypy.json
 Thumbs.db
 
 # Project specific
+# Candidate embeddings are too large for git (~150MB for 100K candidates)
+# Run: python precompute.py --candidates candidates.jsonl to regenerate
 models/embeddings/*.npy
 models/embeddings/*.pkl
-models/fusion/*.pkl
-models/fusion/*.npy
+# NOTE: fusion model IS committed (small, ~20KB) — it is required at ranking time
+# models/fusion/*.pkl  <-- intentionally NOT excluded
+# models/fusion/*.npy  <-- intentionally NOT excluded
 *.log
 submission.csv
+submission_output.csv

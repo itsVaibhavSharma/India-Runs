@@ -1,0 +1,101 @@
+# Redrob Hackathon — Submission Metadata
+# Team: ThreeTwoOne
+# This file should be at the repo root as submission_metadata.yaml
+
+# ============================================================================
+# Team identity
+# ============================================================================
+team_name: "ThreeTwoOne"
+
+primary_contact:
+  name: "Vaibhav Sharma"
+  email: "vaibhav.sharma@example.com"
+  phone: "+91-XXXXXXXXXX"
+
+team_members:
+  - name: "Vaibhav Sharma"
+    email: "vaibhav.sharma@example.com"
+    role: "Team Lead / ML Engineer"
+  - name: "Shreya Khantal"
+    email: "shreya.khantal@example.com"
+    role: "ML Engineer / Data Scientist"
+
+# ============================================================================
+# Code and reproducibility
+# ============================================================================
+github_repo: "https://github.com/itsVaibhavSharma/India-Runs"
+
+sandbox_link: "https://share.streamlit.io/itsvaibhavsharma/india-runs"
+
+# Single command to reproduce submission CSV from candidates file
+# (Pre-computation must be done once separately — see README.md)
+reproduce_command: "python rank.py --candidates ./candidates.jsonl --out ./submission.csv"
+
+precompute_command: "python precompute.py --candidates ./candidates.jsonl --jd ./job_description.docx"
+
+# ============================================================================
+# Compute environment
+# ============================================================================
+compute:
+  platform: "Local Machine / Streamlit Cloud"
+  cpu_cores: 8
+  ram_gb: 16
+  python_version: "3.11"
+  os: "Windows 11 / Linux (deployment)"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: true
+  pre_computation_time_minutes: 45   # includes embedding 100K candidates
+  ranking_time_minutes: 3            # well within 5-minute budget
+
+# ============================================================================
+# AI tools declaration
+# ============================================================================
+ai_tools_used:
+  - "Claude (Anthropic) — architectural discussion, code review, debugging"
+  - "GitHub Copilot — autocomplete and boilerplate"
+
+ai_usage_summary: |
+  Used Claude for discussing system architecture, reviewing signal extraction
+  logic, and debugging edge cases. Used GitHub Copilot for code autocomplete.
+  No candidate data was passed to any external LLM or API.
+  All core logic (7-signal extraction, behavioral gating, honeypot detection,
+  trust-weighted scoring, fusion model design) was authored and validated by
+  the team members. The ranking pipeline runs fully offline with no external
+  API calls during inference.
+
+# ============================================================================
+# Approach summary (≤200 words)
+# ============================================================================
+methodology_summary: |
+  Two-stage CPU-only ranker for the Senior AI Engineer role at Redrob AI.
+
+  Stage 1 (Fast Filtering): Stream all 100K candidates, extract 7 independent
+  signals per candidate: (1) title/career match with production+retrieval
+  evidence, (2) trust-weighted skill depth (endorsements × duration ×
+  proficiency × JD-relevance multiplier), (3) experience fit (5-9yr optimal),
+  (4) education tier + field relevance, (5) location match, (6) behavioral
+  availability gate (open_to_work + ≤60d active + response_rate>10%), and
+  (7) honeypot penalty (timeline impossibility, skill inflation, company age
+  mismatch, salary/experience mismatch). Gate removes inactive candidates
+  early. Top 500 by semantic similarity (pre-computed all-MiniLM-L6-v2
+  embeddings) advance.
+
+  Stage 2 (Reranking): LogisticRegression + IsotonicRegression trained on
+  synthetic JD-derived preference pairs fuses 7 signals + 4 interaction
+  terms into a calibrated score. Combined 90/10 with semantic similarity.
+  Honeypot penalty enforced as hard multiplier. Scores calibrated to [0,1]
+  with monotonic enforcement. Template-based reasoning grounds all claims
+  in verified candidate profile data (no hallucination).
+
+# ============================================================================
+# Declarations
+# ============================================================================
+declarations:
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true
+  no_network_during_ranking: true
+  no_gpu_during_ranking: true

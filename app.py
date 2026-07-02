@@ -1,171 +1,609 @@
-"""
-Streamlit App for Redrob Candidate Ranker - Deployment Demo
-Run: streamlit run app.py
+"""Streamlit App — Redrob Intelligent Candidate Ranker
+Team: ThreeTwoOne | Vaibhav Sharma & Shreya Khantal
+
+Run locally:  streamlit run app.py
+Deploy:       streamlit cloud (connects to this GitHub repo)
 """
 
-import streamlit as st
-import pandas as pd
+from __future__ import annotations
+
+import gzip
+import io
 import json
-import tempfile
+import logging
 import os
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+import pandas as pd
+import streamlit as st
 
-from ranker.__main__ import Ranker
+# ── Path setup ──────────────────────────────────────────────────────────────
+_HERE = Path(__file__).parent
+sys.path.insert(0, str(_HERE / "src"))
 
+# Suppress TF/transformers noise in the UI
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+
+# ── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Redrob Candidate Ranker",
+    page_title="Redrob Ranker · ThreeTwoOne",
     page_icon="🎯",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🎯 Redrob Intelligent Candidate Ranker")
-st.markdown("""
-Rank candidates for **Senior AI Engineer - Founding Team** at Redrob AI.
-Upload a candidate JSONL file and get top 100 ranked results with explanations.
-""")
+# ── Custom CSS ───────────────────────────────────────────────────────────────
+st.markdown(
+    """
+<style>
+/* ── Global fonts & palette ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-# Sidebar
-st.sidebar.header("Configuration")
-jd_path = st.sidebar.text_input(
-    "Job Description Path",
-    value="../Dataset/job_description.docx",
-    help="Path to the JD file"
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+/* Dark gradient background */
+.stApp {
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    min-height: 100vh;
+}
+
+/* Hero header */
+.hero-title {
+    font-size: 2.6rem;
+    font-weight: 700;
+    background: linear-gradient(90deg, #a78bfa, #60a5fa, #34d399);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.2rem;
+}
+.hero-sub {
+    color: #94a3b8;
+    font-size: 1.05rem;
+    margin-bottom: 1.5rem;
+}
+
+/* Cards */
+.card {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 1.2rem 1.5rem;
+    backdrop-filter: blur(10px);
+    margin-bottom: 1rem;
+}
+
+/* Metric pills */
+.metric-pill {
+    display: inline-block;
+    background: rgba(167,139,250,0.15);
+    border: 1px solid rgba(167,139,250,0.35);
+    border-radius: 999px;
+    padding: 0.25rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #c4b5fd;
+    margin: 0.2rem;
+}
+
+/* Score bar */
+.score-bar-outer {
+    background: rgba(255,255,255,0.08);
+    border-radius: 999px;
+    height: 6px;
+    width: 100%;
+    margin-top: 4px;
+}
+.score-bar-inner {
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #a78bfa, #60a5fa);
+}
+
+/* Top candidate card */
+.top-cand {
+    background: linear-gradient(135deg, rgba(167,139,250,0.12), rgba(96,165,250,0.08));
+    border: 1px solid rgba(167,139,250,0.3);
+    border-radius: 14px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.7rem;
+    transition: transform 0.15s;
+}
+.top-cand:hover { transform: translateY(-2px); }
+.rank-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, #a78bfa, #60a5fa);
+    color: white;
+    font-weight: 700;
+    font-size: 0.8rem;
+    padding: 0.1rem 0.6rem;
+    border-radius: 999px;
+    margin-right: 0.5rem;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+    background: rgba(15, 12, 41, 0.8);
+    border-right: 1px solid rgba(255,255,255,0.07);
+}
+
+/* Buttons */
+.stButton > button {
+    background: linear-gradient(135deg, #7c3aed, #2563eb) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1.4rem !important;
+    transition: opacity 0.2s !important;
+}
+.stButton > button:hover { opacity: 0.88 !important; }
+
+/* Success/info colors */
+.stSuccess { background: rgba(52,211,153,0.1) !important; border-radius: 8px !important; }
+.stInfo    { background: rgba(96,165,250,0.1) !important; border-radius: 8px !important; }
+.stWarning { background: rgba(251,191,36,0.1) !important; border-radius: 8px !important; }
+
+/* DataFrame */
+.dataframe { font-size: 0.85rem !important; }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
-cache_dir = st.sidebar.text_input(
-    "Cache Directory",
-    value="models",
-    help="Directory for cached embeddings and models"
+# ── Hero section ────────────────────────────────────────────────────────────
+col_logo, col_title = st.columns([1, 9])
+with col_logo:
+    st.markdown("<div style='padding-top:0.5rem;font-size:3rem;'>🎯</div>", unsafe_allow_html=True)
+with col_title:
+    st.markdown('<div class="hero-title">Redrob Intelligent Candidate Ranker</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hero-sub">Two-stage hybrid ranking • 7 explainable signals • '
+        'Honeypot detection • CPU-only offline inference</div>',
+        unsafe_allow_html=True,
+    )
+
+# ── Sidebar ──────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### ⚙️ Configuration")
+
+    jd_path = st.text_input(
+        "Job Description Path",
+        value=str(_HERE.parent / "Dataset" / "job_description.docx"),
+        help="Path to the .docx or .md JD file",
+    )
+    cache_dir = st.text_input(
+        "Cache Directory",
+        value=str(_HERE / "models"),
+        help="Directory with cached embeddings and models",
+    )
+    stage1_k = st.slider(
+        "Stage-1 Candidates (semantic filter)",
+        min_value=100, max_value=2000, value=500, step=100,
+    )
+    force_recompute = st.checkbox(
+        "Force Recompute Embeddings",
+        value=False,
+        help="Ignore cached embeddings and recompute (slow)",
+    )
+
+    st.divider()
+    st.markdown("**Team ThreeTwoOne**")
+    st.markdown("Vaibhav Sharma · Shreya Khantal")
+    st.markdown(
+        "[GitHub](https://github.com/itsVaibhavSharma/India-Runs) | "
+        "Redrob Hackathon 2026"
+    )
+
+# ── Main area ────────────────────────────────────────────────────────────────
+tab_run, tab_about, tab_signals = st.tabs(
+    ["🚀 Run Ranker", "📖 About the Pipeline", "📊 Signal Details"]
 )
 
-force_recompute = st.sidebar.checkbox("Force Recompute Embeddings", value=False)
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1: Run Ranker
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_run:
+    st.markdown("### 📁 Upload Candidates File")
+    st.markdown(
+        '<div class="card">Upload a <code>.jsonl</code>, <code>.json</code>, or '
+        '<code>.jsonl.gz</code> file. For the Streamlit demo, a sample of ≤1000 '
+        'candidates works best. The full 100K run is meant for local execution.</div>',
+        unsafe_allow_html=True,
+    )
 
-# File upload
-st.header("📁 Upload Candidates")
-uploaded_file = st.file_uploader(
-    "Upload candidates.jsonl or candidates.jsonl.gz",
-    type=['jsonl', 'gz'],
-    help="Maximum 100K candidates. For demo, upload a small sample."
-)
+    uploaded = st.file_uploader(
+        "Drop candidates file here",
+        type=["jsonl", "json", "gz"],
+        label_visibility="collapsed",
+    )
 
-if uploaded_file:
-    # Save to temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
-        tmp.write(uploaded_file.read())
+    if not uploaded:
+        st.info("👆 Upload a candidates file to start. You can use **sample_candidates.json** from the Dataset folder for a quick demo.")
+
+    else:
+        # ── Save upload to temp file ────────────────────────────────────────
+        suffix = "." + uploaded.name.split(".")[-1]
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(uploaded.read())
+        tmp.flush()
         tmp_path = tmp.name
+        tmp.close()
 
-    st.success(f"Uploaded: {uploaded_file.name} ({uploaded_file.size:,} bytes)")
+        st.success(f"✅ Uploaded **{uploaded.name}** ({uploaded.size:,} bytes)")
 
-    # Preview
-    if st.loader
-    if st.button("🔍 Preview Data (first 5)"):
-        try:
-            if tmp_path.endswith('.gz'):
-                import gzip
-                with gzip.open(tmp_path, 'rt', encoding='utf-8') as f:
-                    lines = [next(f) for _ in range(5)]
-            else:
-                with open(tmp_path, 'r', encoding='utf-8') as f:
-                    lines = [next(f) for _ in range(5)]
+        # ── Preview ─────────────────────────────────────────────────────────
+        with st.expander("🔍 Preview first 5 candidates"):
+            try:
+                if tmp_path.endswith(".gz"):
+                    opener = lambda: gzip.open(tmp_path, "rt", encoding="utf-8")
+                else:
+                    opener = lambda: open(tmp_path, "r", encoding="utf-8")
 
-            for i, line in enumerate(lines):
-                data = json.loads(line)
-                st.json({
-                    "candidate_id": data.get("candidate_id"),
-                    "name": data.get("profile", {}).get("anonymized_name"),
-                    "title": data.get("profile", {}).get("current_title"),
-                    "company": data.get("profile", {}).get("current_company"),
-                    "experience": data.get("profile", {}).get("years_of_experience"),
-                    "location": data.get("profile", {}).get("location"),
-                    "skills_count": len(data.get("skills", [])),
-                    "last_active": data.get("redrob_signals", {}).get("last_active_date"),
-                    "response_rate": data.get("redrob_signals", {}).get("recruiter_response_rate"),
-                })
-        except Exception as e:
-            st.error(f"Preview error: {e}")
+                with opener() as f:
+                    first = f.read(1)
+                    f.seek(0)
+                    if first == "[":
+                        raw = json.load(f)[:5]
+                    else:
+                        raw = [json.loads(next(f)) for _ in range(min(5, sum(1 for _ in open(tmp_path))))]
 
-    # Run ranking
-    if st.button("🚀 Rank Candidates", type="primary"):
-        output_path = "submission.csv"
+                for item in raw:
+                    p = item.get("profile", {})
+                    sig = item.get("redrob_signals", {})
+                    st.json({
+                        "candidate_id": item.get("candidate_id"),
+                        "title": p.get("current_title"),
+                        "company": p.get("current_company"),
+                        "experience_yrs": p.get("years_of_experience"),
+                        "location": p.get("location"),
+                        "skills_count": len(item.get("skills", [])),
+                        "open_to_work": sig.get("open_to_work_flag"),
+                        "last_active": sig.get("last_active_date"),
+                        "response_rate": sig.get("recruiter_response_rate"),
+                        "github_activity": sig.get("github_activity_score"),
+                    })
+            except Exception as exc:
+                st.warning(f"Preview failed: {exc}")
 
-        with st.spinner("Ranking candidates... This may take a few minutes."):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        # ── Run Ranking ──────────────────────────────────────────────────────
+        col_btn1, col_btn2 = st.columns([3, 1])
+        with col_btn1:
+            run_btn = st.button("🚀 Run Ranking Pipeline", type="primary", use_container_width=True)
+        with col_btn2:
+            st.markdown("")   # spacer
+
+        if run_btn:
+            out_path = str(_HERE / "submission_output.csv")
+            progress = st.progress(0, text="Initialising pipeline…")
+            status = st.empty()
+            log_box = st.empty()
 
             try:
-                ranker = Ranker(jd_path, tmp_path, cache_dir)
+                from ranker.__main__ import Ranker
 
-                # Patch to show progress
-                original_run = ranker.run
+                start = time.time()
 
-                def run_with_progress(output_path, force_recompute=False):
-                    # We can't easily hook into the internal progress, so just run
-                    return original_run(output_path, force_recompute)
+                # Check JD
+                if not Path(jd_path).exists():
+                    st.error(f"JD file not found: {jd_path}")
+                    st.stop()
 
-                run_with_progress(output_path, force_recompute)
-                progress_bar.progress(1.0)
-                status_text.success("Ranking complete!")
+                status.info("⚙️ Parsing job description…")
+                progress.progress(5, text="Parsing JD…")
 
-            except Exception as e:
-                st.error(f"Ranking failed: {e}")
+                ranker = Ranker(jd_path=jd_path, candidates_path=tmp_path, cache_dir=cache_dir)
+
+                status.info("📐 Extracting candidate signals & embeddings…")
+                progress.progress(20, text="Loading candidates and extracting signals…")
+
+                ranker.run(
+                    output_path=out_path,
+                    force_recompute=force_recompute,
+                    final_top_k=100,
+                    stage1_top_k=stage1_k,
+                )
+
+                progress.progress(100, text="Done!")
+                elapsed = time.time() - start
+                status.success(f"✅ Ranking complete in **{elapsed:.1f}s** ({elapsed/60:.1f} min)")
+
+            except Exception as exc:
                 import traceback
-                st.code(traceback.format_exc())
+                status.error(f"❌ Ranking failed: {exc}")
+                with st.expander("Error details"):
+                    st.code(traceback.format_exc())
+                st.stop()
+
             finally:
-                # Cleanup temp file
                 try:
                     os.unlink(tmp_path)
-                except:
+                except Exception:
                     pass
 
-        # Display results
-        if os.path.exists(output_path):
-            df = pd.read_csv(output_path)
-            st.header(f"📊 Top {len(df)} Ranked Candidates")
+            # ── Display results ──────────────────────────────────────────────
+            if Path(out_path).exists():
+                df = pd.read_csv(out_path)
+                st.markdown(f"### 🏆 Top {len(df)} Ranked Candidates")
 
-            # Format display
-            display_df = df.copy()
-            display_df['score'] = display_df['score'].apply(lambda x: f"{x:.4f}")
+                # KPI metrics
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Top Score", f"{df['score'].max():.4f}")
+                m2.metric("Bottom Score", f"{df['score'].min():.4f}")
+                m3.metric("Score Range", f"{df['score'].max() - df['score'].min():.4f}")
+                m4.metric("Candidates Ranked", len(df))
 
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "candidate_id": "Candidate ID",
-                    "rank": "Rank",
-                    "score": "Score",
-                    "reasoning": "Reasoning"
+                # Top-10 cards
+                st.markdown("#### 🥇 Top 10 Candidates")
+                for _, row in df.head(10).iterrows():
+                    bar_pct = int(row["score"] * 100)
+                    st.markdown(
+                        f'<div class="top-cand">'
+                        f'<span class="rank-badge">#{int(row["rank"])}</span> '
+                        f'<strong>{row["candidate_id"]}</strong> — '
+                        f'Score: <strong>{row["score"]:.4f}</strong>'
+                        f'<div class="score-bar-outer"><div class="score-bar-inner" style="width:{bar_pct}%"></div></div>'
+                        f'<p style="color:#cbd5e1;font-size:0.82rem;margin:0.4rem 0 0 0">{row["reasoning"]}</p>'
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Full table
+                st.markdown("#### 📋 Full Rankings Table")
+                display_df = df.copy()
+                display_df["score"] = display_df["score"].apply(lambda x: f"{x:.6f}")
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "candidate_id": st.column_config.TextColumn("Candidate ID", width="medium"),
+                        "rank": st.column_config.NumberColumn("Rank", width="small"),
+                        "score": st.column_config.TextColumn("Score", width="small"),
+                        "reasoning": st.column_config.TextColumn("Reasoning", width="large"),
+                    },
+                )
+
+                # Score distribution chart
+                st.markdown("#### 📈 Score Distribution")
+                score_df = df[["rank", "score"]].copy()
+                st.line_chart(score_df.set_index("rank")["score"])
+
+                # Download
+                csv_bytes = df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Download submission.csv",
+                    data=csv_bytes,
+                    file_name="submission.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2: About the Pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_about:
+    st.markdown("## 🧠 Pipeline Architecture")
+    st.markdown(
+        """
+<div class="card">
+
+**Two-stage CPU-only ranking system** targeting 100K candidates in &lt;5 minutes.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  INPUT: candidates.jsonl (100K)  +  job_description.docx    │
+└──────────────────────────┬──────────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STAGE 1: Signal Extraction + Behavioral Gate (~2.5 min)    │
+│  • 7 independent signal scores per candidate                │
+│  • Hard filter: open_to_work + active≤60d + response>10%   │
+│  • Semantic similarity (pre-computed 384-dim embeddings)    │
+│  • Top 500 advance                                          │
+└──────────────────────────┬──────────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  STAGE 2: Fusion + Calibration + Reasoning (~30 sec)        │
+│  • LogisticRegression + IsotonicRegression                  │
+│  • Trained on synthetic JD-derived preference pairs        │
+│  • Combined 90% fusion + 10% semantic similarity            │
+│  • Honeypot penalty enforcement                             │
+│  • Monotonic score enforcement + [0,1] calibration         │
+│  • Template-based reasoning (fact-grounded, no hallucin.)   │
+└──────────────────────────┬──────────────────────────────────┘
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  OUTPUT: submission.csv (100 rows)                          │
+│  candidate_id | rank | score | reasoning                    │
+└─────────────────────────────────────────────────────────────┘
+```
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("## 🎯 JD Requirements Mapped to Signals")
+    st.markdown(
+        """
+| Requirement | Signal | Weight |
+|-------------|--------|--------|
+| Production embeddings/retrieval | Title/Career | 25% |
+| Vector DB / hybrid search | Skill Depth | 20% |
+| Strong Python + code quality | Skill Depth + GitHub | 20% |
+| 5-9 years experience | Experience | 15% |
+| Active on Redrob platform | Behavioral Gate | 15% |
+| Ranking evaluation (NDCG/MRR) | Title/Career | 10% |
+| Preferred locations (Pune/Noida) | Location | 5% |
+| Product company background | Title/Career | 5% |
+| Education (Tier-1 institution) | Education | 5% |
+""",
+    )
+
+    st.markdown("## 🚫 Disqualifiers Implemented")
+    st.markdown(
+        """
+- **Pure research** (no production deployment evidence) → Title/Career penalty  
+- **Services background** (TCS/Infosys/Wipro etc.) → 0.20 penalty on title score  
+- **Inactive** (not open to work, >60d, <10% response) → Behavioral gate (score=0)  
+- **Job hopping** (>4 companies, <18mo avg tenure) → Honeypot penalty  
+- **Keyword stuffing** (expert in 10+ skills, all <12mo duration) → Honeypot penalty  
+- **Timeline impossibilities** (tenure > company age, etc.) → Honeypot penalty  
+"""
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3: Signal Details
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_signals:
+    st.markdown("## 📊 Signal Breakdown Explorer")
+    st.markdown("Paste a candidate JSON to see its full signal breakdown:")
+
+    sample_json = json.dumps(
+        {
+            "candidate_id": "CAND_0000001",
+            "profile": {
+                "current_title": "Senior ML Engineer",
+                "current_company": "Swiggy",
+                "current_industry": "Technology",
+                "years_of_experience": 6.5,
+                "location": "Bengaluru",
+                "country": "India",
+                "summary": "ML engineer with 6.5 years building production retrieval systems.",
+                "headline": "Senior ML Engineer | Embeddings | Ranking | Vector Search",
+            },
+            "career_history": [
+                {
+                    "company": "Swiggy",
+                    "title": "Senior ML Engineer",
+                    "start_date": "2022-01-01",
+                    "end_date": None,
+                    "duration_months": 30,
+                    "is_current": True,
+                    "industry": "Technology",
+                    "company_size": "5001-10000",
+                    "description": "Built embedding-based retrieval system using FAISS and sentence-transformers for food search. Deployed to production serving millions of users. Implemented learning-to-rank with XGBoost. Evaluated with NDCG@10 and MRR. A/B tested ranking improvements.",
                 }
-            )
+            ],
+            "education": [
+                {
+                    "institution": "IIT Delhi",
+                    "degree": "B.Tech",
+                    "field_of_study": "Computer Science",
+                    "start_year": 2015,
+                    "end_year": 2019,
+                    "grade": "8.9 CGPA",
+                    "tier": "tier_1",
+                }
+            ],
+            "skills": [
+                {"name": "Python", "proficiency": "expert", "endorsements": 45, "duration_months": 72},
+                {"name": "FAISS", "proficiency": "advanced", "endorsements": 12, "duration_months": 30},
+                {"name": "sentence-transformers", "proficiency": "advanced", "endorsements": 8, "duration_months": 30},
+                {"name": "XGBoost", "proficiency": "advanced", "endorsements": 15, "duration_months": 36},
+            ],
+            "certifications": [],
+            "languages": [{"language": "English", "proficiency": "professional"}],
+            "redrob_signals": {
+                "profile_completeness_score": 92.0,
+                "signup_date": "2025-01-01",
+                "last_active_date": "2026-06-25",
+                "open_to_work_flag": True,
+                "profile_views_received_30d": 35,
+                "applications_submitted_30d": 3,
+                "recruiter_response_rate": 0.72,
+                "avg_response_time_hours": 4.5,
+                "skill_assessment_scores": {"Python": 88.0, "Machine Learning": 79.0},
+                "connection_count": 420,
+                "endorsements_received": 67,
+                "notice_period_days": 30,
+                "expected_salary_range_inr_lpa": {"min": 35, "max": 55},
+                "preferred_work_mode": "hybrid",
+                "willing_to_relocate": True,
+                "github_activity_score": 62.0,
+                "search_appearance_30d": 180,
+                "saved_by_recruiters_30d": 8,
+                "interview_completion_rate": 0.90,
+                "offer_acceptance_rate": 0.75,
+                "verified_email": True,
+                "verified_phone": True,
+                "linkedin_connected": True,
+            },
+        },
+        indent=2,
+    )
 
-            # Download button
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download submission.csv",
-                data=csv,
-                file_name="submission.csv",
-                mime="text/csv"
-            )
+    cand_json_str = st.text_area("Candidate JSON", value=sample_json, height=300)
 
-            # Stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Top Score", f"{df['score'].max():.4f}")
-            with col2:
-                st.metric("Score Range", f"{df['score'].max() - df['score'].min():.4f}")
-            with col3:
-                st.metric("Candidates", len(df))
+    if st.button("🔬 Analyse Signals"):
+        try:
+            from ranker.candidate_loader import CandidateLoader
+            from ranker.signals import SignalExtractor
+            from ranker.fusion import SignalFusion
+            from ranker.jd_parser import parse_jd
+            from ranker.reasoning import generate_reasoning
 
-else:
-    st.info("👆 Upload a candidates JSONL file to start ranking")
+            loader = CandidateLoader.__new__(CandidateLoader)
+            loader.candidates_path = Path("dummy")
+            cand_data = json.loads(cand_json_str)
+            candidate = loader._parse_candidate(cand_data)
 
-# Footer
-st.markdown("---")
-st.markdown("""
-**Team:** ThreeTwoOne | **Leader:** Vaibhav Sharma  
-**Track:** Intelligent Candidate Discovery & Ranking Challenge
-""")
+            req = None
+            if Path(jd_path).exists():
+                req = parse_jd(jd_path)
+
+            extractor = SignalExtractor(req)
+            scores = extractor.extract_all_signals(candidate)
+            sig_dict = scores.to_dict()
+
+            # Display signal bars
+            st.markdown("### Signal Scores")
+            signal_labels = {
+                "title_career": "🏷️ Title / Career",
+                "skill_depth": "🔧 Skill Depth",
+                "experience": "📅 Experience",
+                "education": "🎓 Education",
+                "location": "📍 Location",
+                "behavioral": "💚 Behavioral",
+                "honeypot_penalty": "⚠️ Honeypot Penalty",
+            }
+            for key, label in signal_labels.items():
+                val = sig_dict.get(key, 0.0)
+                colour = "#ef4444" if key == "honeypot_penalty" and val > 0 else "#a78bfa"
+                st.markdown(
+                    f"**{label}**: `{val:.3f}`"
+                    f'<div class="score-bar-outer"><div class="score-bar-inner" '
+                    f'style="width:{val*100:.0f}%;background:{colour}"></div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Fusion score
+            fusion = SignalFusion(model_dir=str(_HERE / "models" / "fusion"))
+            if not fusion.load():
+                fusion.train(req)
+            final_score = fusion.predict_proba(sig_dict)
+            st.metric("🎯 Fusion Score", f"{final_score:.4f}")
+
+            # Reasoning
+            reasoning = generate_reasoning(candidate, sig_dict, 1, final_score, req)
+            st.markdown("### 📝 Generated Reasoning")
+            st.info(reasoning)
+
+        except Exception as exc:
+            import traceback
+            st.error(f"Analysis failed: {exc}")
+            st.code(traceback.format_exc())
+
+# ── Footer ────────────────────────────────────────────────────────────────────
+st.divider()
+st.markdown(
+    '<p style="color:#475569;text-align:center;font-size:0.82rem;">'
+    "Team ThreeTwoOne · Vaibhav Sharma &amp; Shreya Khantal · "
+    "Redrob Hackathon 2026 · Intelligent Candidate Discovery &amp; Ranking</p>",
+    unsafe_allow_html=True,
+)
