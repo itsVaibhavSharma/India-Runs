@@ -1,224 +1,404 @@
-"""Main Ranker - Orchestrates the two-stage ranking pipeline."""
+"""Main Ranker Pipeline — Two-stage candidate ranking for the Redrob challenge.
+
+Stage 0: Parse JD → structured requirements
+Stage 1: Load all 100K candidates, extract 7 signals, apply behavioral gate
+Stage 2: Semantic similarity filtering → top-500 advance
+Stage 3: Signal fusion + calibration → final scores
+Stage 4: Honeypot penalty enforcement
+Stage 5: Sort, generate per-candidate reasoning, write submission.csv
+
+All computation is CPU-only.  No network calls are made during ranking.
+Pre-computed artifacts (candidate embeddings, fusion model) are loaded
+from the local models/ directory.
+"""
+
+from __future__ import annotations
 
 import csv
 import logging
 import time
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 from tqdm import tqdm
 
-from .jd_parser import parse_jd
-from .candidate_loader import CandidateLoader
-from .signals import SignalExtractor
+from .jd_parser import JDRequirements, parse_jd
+from .candidate_loader import Candidate, CandidateLoader
+from .signals import SignalExtractor, SignalScores
 from .embeddings import EmbeddingManager
 from .fusion import SignalFusion
 from .reasoning import generate_reasoning
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_STAGE1_TOP_K = 500      # candidates that advance to stage 2
+_FINAL_TOP_K = 100       # candidates in the submission
+_SIM_WEIGHT = 0.10       # weight for semantic similarity in final score
+_FUSION_WEIGHT = 0.90    # weight for fusion score in final score
+
+
+# ---------------------------------------------------------------------------
+# JD text builder (used to compute JD embedding)
+# ---------------------------------------------------------------------------
+
+def _build_jd_query_text(req: JDRequirements) -> str:
+    """Build a rich query string from JD requirements for semantic search."""
+    parts = [
+        "Senior AI Engineer Founding Team production ranking retrieval",
+        "embeddings vector search semantic search hybrid search",
+        "sentence-transformers FAISS Pinecone Weaviate Qdrant Milvus",
+        "NDCG MRR MAP A/B testing learning to rank evaluation",
+        "Python production deployment real users scale",
+        "5-9 years experience product company startup",
+        "Pune Noida Hyderabad Mumbai Delhi NCR",
+    ]
+    if req.must_have_skills:
+        parts.append(" ".join(req.must_have_skills[:10]))
+    if req.nice_to_have_skills:
+        parts.append(" ".join(req.nice_to_have_skills[:5]))
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Ranker class
+# ---------------------------------------------------------------------------
 
 class Ranker:
-    def __init__(self, jd_path: str, candidates_path: str, cache_dir: str = 'models'):
-        self.jd_path = jd_path
-        self.candidates_path = candidates_path
+    """Orchestrates the two-stage ranking pipeline."""
+
+    def __init__(
+        self,
+        jd_path: str,
+        candidates_path: str,
+        cache_dir: str = "models",
+    ):
+        self.jd_path = str(jd_path)
+        self.candidates_path = str(candidates_path)
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.jd_requirements = None
-        self.jd_embedding = None
-        self.candidates = []
-        self.candidate_embeddings = None
-        self.candidate_ids = None
+        self.jd_requirements: Optional[JDRequirements] = None
 
-    def run(self, output_path: str, force_recompute: bool = False,
-            stage1,
-            final_top_k: int = 100, stage1_top_k: int = 500):
-        start_time = time.time()
-        logger.info("=" * 60)
-        logger.info("Starting Redrob Candidate Ranking Pipeline")
-        logger.info("=" * 60)
+    # ------------------------------------------------------------------
+    # Main pipeline entry point
+    # ------------------------------------------------------------------
 
+    def run(
+        self,
+        output_path: str,
+        force_recompute: bool = False,
+        final_top_k: int = _FINAL_TOP_K,
+        stage1_top_k: int = _STAGE1_TOP_K,
+    ) -> None:
+        wall_start = time.time()
+        logger.info("=" * 65)
+        logger.info("  Redrob Intelligent Candidate Ranking Pipeline")
+        logger.info("  Team: ThreeTwoOne | Vaibhav Sharma & Shreya Khantal")
+        logger.info("=" * 65)
+
+        # ----------------------------------------------------------------
         # Stage 0: Parse JD
-        logger.info("Stage 0: Parsing job description...")
+        # ----------------------------------------------------------------
+        logger.info("[Stage 0] Parsing job description: %s", self.jd_path)
         self.jd_requirements = parse_jd(self.jd_path)
-        logger.info(f"  Extracted {len(self.jd_requirements.must_have_skills)} must-have skills")
-        logger.info(f"  Experience range: {self.jd_requirements.required_experience_range}")
+        logger.info(
+            "  must-have skills: %d | nice-to-have: %d | exp: %s",
+            len(self.jd_requirements.must_have_skills),
+            len(self.jd_requirements.nice_to_have_skills),
+            self.jd_requirements.optimal_experience_range,
+        )
 
-        # Stage 1: Load candidates and extract signals
-        logger.info("Stage 1: Loading candidates and extracting signals...")
+        # ----------------------------------------------------------------
+        # Stage 1: Load candidates & extract signals
+        # ----------------------------------------------------------------
+        logger.info("[Stage 1] Loading candidates from: %s", self.candidates_path)
         loader = CandidateLoader(self.candidates_path)
-        total_candidates = loader.count_candidates()
-        logger.info(f"  Total candidates: {total_candidates}")
-
-        signal_extractor = SignalExtractor(self.jd_requirements)
-        embedding_manager = EmbeddingManager(self.cache_dir / 'embeddings')
 
         # Load or compute candidate embeddings
-        logger.info("  Computing/loading candidate embeddings...")
-        self.candidates = loader.load_all_candidates()
-        self.candidate_embeddings, self.candidate_ids = embedding_manager.get_candidate_embeddings(
-            self.candidates, force_recompute=force_recompute
+        emb_manager = EmbeddingManager(
+            cache_dir=str(self.cache_dir / "embeddings"),
+            model_dir=str(self.cache_dir / "embedding_model"),
         )
 
-        # Compute JD embedding
-        logger.info("  Computing JD embedding...")
-        jd_text = self._build_jd_text()
-        self.jd_embedding = embedding_manager.get_jd_embedding(jd_text)
+        # Load all candidates (needed for embedding alignment)
+        all_candidates: List[Candidate] = []
+        logger.info("  Reading all candidates (this may take ~30s for 100K)…")
+        all_candidates = loader.load_all_candidates()
+        logger.info("  Loaded %d candidates.", len(all_candidates))
 
-        # Compute signal scores for all candidates
-        logger.info("  Extracting signals for all candidates...")
-        all_signals = []
-        valid_candidates = []
-        candidate_indices = []
+        # Get embeddings (from cache or compute)
+        logger.info("  Fetching candidate embeddings…")
+        candidate_embeddings, candidate_ids = emb_manager.get_candidate_embeddings(
+            all_candidates, force_recompute=force_recompute
+        )
+        # Build id→index map for alignment
+        id_to_idx: Dict[str, int] = {cid: i for i, cid in enumerate(candidate_ids)}
 
-        for idx, candidate in enumerate(tqdm(self.candidates, desc="Signal extraction")):
-            signals = signal_extractor.extract_all_signals(candidate)
-            # Apply behavioral gate early
-            if signals.behavioral == 0.0 and signals.honeypot_penalty < 0.5:
+        # ----------------------------------------------------------------
+        # Stage 1b: Signal extraction + behavioral gate
+        # ----------------------------------------------------------------
+        logger.info("[Stage 1b] Extracting signals for all candidates…")
+        signal_extractor = SignalExtractor(self.jd_requirements)
+
+        valid_candidates: List[Candidate] = []
+        valid_signals: List[Dict[str, float]] = []
+        valid_emb_indices: List[int] = []   # index into candidate_embeddings
+
+        for candidate in tqdm(all_candidates, desc="Signal extraction", unit="cand"):
+            scores: SignalScores = signal_extractor.extract_all_signals(candidate)
+
+            # BEHAVIORAL GATE: completely inactive candidates are excluded
+            # (they're ranked lower in ground truth regardless of skills)
+            if scores.behavioral == 0.0:
                 continue
 
-            signal_dict = {
-                'title_career': signals.title_career,
-                'skill_depth': signals.skill_depth,
-                'experience': signals.experience,
-                'education': signals.education,
-                'location': signals.location,
-                'behavioral': signals.behavioral,
-                'honeypot_penalty': signals.honeypot_penalty
-            }
-            all_signals.append(signal_dict)
+            # Early honeypot hard-exclude (extreme cases)
+            if scores.honeypot_penalty >= 0.95:
+                continue
+
+            idx = id_to_idx.get(candidate.candidate_id, -1)
+            if idx == -1:
+                continue   # embedding not found for this candidate
+
+            sig_dict = scores.to_dict()
             valid_candidates.append(candidate)
-            candidate_indices.append(idx)
+            valid_signals.append(sig_dict)
+            valid_emb_indices.append(idx)
 
-        logger.info(f"  Candidates passing behavioral gate: {len(valid_candidates)}")
-
-        # Stage 2: Semantic similarity filtering
-        logger.info("Stage 2: Semantic similarity filtering...")
-        similarities = embedding_manager.compute_similarities(
-            self.jd_embedding, self.candidate_embeddings
+        logger.info(
+            "  Candidates passing behavioral gate: %d / %d",
+            len(valid_candidates), len(all_candidates),
         )
 
-        valid_similarities = similarities[candidate_indices]
-        top_k = min(stage1_top_k, len(valid_similarities))
-        top_indices = np.argpartition(valid_similarities, -top_k)[-top_k:]
-        top_indices = top_indices[np.argsort(valid_similarities[top_indices])[::-1]]
+        # ----------------------------------------------------------------
+        # Stage 2: Semantic similarity filtering → top-K
+        # ----------------------------------------------------------------
+        logger.info("[Stage 2] Semantic similarity filtering (top %d)…", stage1_top_k)
+        jd_text = _build_jd_query_text(self.jd_requirements)
+        jd_embedding = emb_manager.get_jd_embedding(jd_text)
 
-        stage2_candidates = [valid_candidates[i] for i in top_indices]
-        stage2_signals = [all_signals[i] for i in top_indices]
-        stage2_similarities = valid_similarities[top_indices]
+        valid_emb_matrix = candidate_embeddings[valid_emb_indices]  # (N, 384)
+        similarities = emb_manager.compute_similarities(jd_embedding, valid_emb_matrix)
 
-        logger.info(f"  Advanced to reranking: {len(stage2_candidates)}")
+        # Compute a quick composite for stage-1 filtering
+        # (80% semantic + 20% behavioral gate hint — keep it fast)
+        behavioral_arr = np.array([s["behavioral"] for s in valid_signals], dtype=np.float32)
+        quick_score = similarities * 0.80 + behavioral_arr * 0.20
 
-        # Stage 3: Signal fusion and reranking
-        logger.info("Stage 3: Signal fusion and reranking...")
-        fusion = SignalFusion(self.cache_dir / 'fusion')
+        # Select top-K by quick score
+        top_k = min(stage1_top_k, len(quick_score))
+        top_idx = np.argpartition(quick_score, -top_k)[-top_k:]
+        top_idx = top_idx[np.argsort(quick_score[top_idx])[::-1]]
+
+        stage2_candidates = [valid_candidates[i] for i in top_idx]
+        stage2_signals    = [valid_signals[i]    for i in top_idx]
+        stage2_sims       = similarities[top_idx]
+
+        logger.info("  Advanced to stage-2 reranking: %d", len(stage2_candidates))
+
+        # ----------------------------------------------------------------
+        # Stage 3: Signal fusion + calibration
+        # ----------------------------------------------------------------
+        logger.info("[Stage 3] Signal fusion and score calibration…")
+        fusion = SignalFusion(model_dir=str(self.cache_dir / "fusion"))
 
         if not fusion.load():
-            logger.info("  Training fusion model...")
+            logger.info("  Fusion model not cached — training from JD-derived pairs…")
             fusion.train(self.jd_requirements)
 
-        final_scores = fusion.predict_batch(stage2_signals)
+        fusion_scores = fusion.predict_batch(stage2_signals)
 
-        # Combine with similarity (small weight)
-        combined_scores = final_scores * 0.9 + stage2_similarities * 0.1
+        # Combine: fusion is primary, semantic similarity is a tiebreaker
+        combined_scores = (
+            fusion_scores * _FUSION_WEIGHT +
+            stage2_sims   * _SIM_WEIGHT
+        )
 
+        # ----------------------------------------------------------------
         # Stage 4: Honeypot penalty enforcement
-        logger.info("Stage 4: Applying honeypot penalties...")
-        for i, signals in enumerate(stage2_signals):
-            if signals['honeypot_penalty'] > 0.3:
-                combined_scores[i] *= (1.0 - signals['honeypot_penalty'])
-            if signals['honeypot_penalty'] > 0.5:
-                combined_scores[i] *= 0.1
+        # ----------------------------------------------------------------
+        logger.info("[Stage 4] Applying honeypot penalties…")
+        for i, sig in enumerate(stage2_signals):
+            hp = sig.get("honeypot_penalty", 0.0)
+            if hp > 0.50:
+                combined_scores[i] *= 0.05   # severe penalty
+            elif hp > 0.30:
+                combined_scores[i] *= (1.0 - hp * 0.80)
 
-        # Stage 5: Sort and generate output
-        logger.info("Stage 5: Sorting and generating output...")
-        ranked_indices = np.argsort(combined_scores)[::-1]
-        final_candidates = [stage2_candidates[i] for i in ranked_indices[:final_top_k]]
-        final_scores = combined_scores[ranked_indices[:final_top_k]]
-        final_signals = [stage2_signals[i] for i in ranked_indices[:final_top_k]]
+        # ----------------------------------------------------------------
+        # Stage 5: Sort, tie-break, generate output
+        # ----------------------------------------------------------------
+        logger.info("[Stage 5] Sorting and generating submission…")
+        # Primary sort: combined_score descending
+        # Tie-break: candidate_id ascending (as per spec)
+        sort_keys = list(zip(
+            [-s for s in combined_scores],                  # descending score
+            [c.candidate_id for c in stage2_candidates],   # ascending id
+        ))
+        sorted_order = sorted(range(len(stage2_candidates)), key=lambda i: sort_keys[i])
 
-        # Enforce monotonic scores
-        final_scores = np.maximum.accumulate(final_scores[::-1])[::-1]
+        # Take top-K
+        final_order = sorted_order[:final_top_k]
+        final_candidates = [stage2_candidates[i] for i in final_order]
+        final_scores     = np.array([combined_scores[i] for i in final_order], dtype=np.float64)
+        final_signals    = [stage2_signals[i] for i in final_order]
 
-        # Generate reasoning
-        logger.info("  Generating reasoning for top 100...")
-        output_rows = []
-        for rank, (candidate, score, signals) in enumerate(zip(final_candidates, final_scores, final_signals), 1):
-            reasoning = generate_reasoning(candidate, signals, rank, float(score), self.jd_requirements)
-            output_rows.append({
-                'candidate_id': candidate.candidate_id,
-                'rank': rank,
-                'score': round(float(score), 6),
-                'reasoning': reasoning
+        # Enforce monotonically non-increasing scores
+        for i in range(1, len(final_scores)):
+            if final_scores[i] > final_scores[i - 1]:
+                final_scores[i] = final_scores[i - 1]
+
+        # Calibrate to [0, 1]
+        s_max = final_scores[0] if final_scores[0] > 0 else 1.0
+        s_min = final_scores[-1]
+        if s_max > s_min:
+            final_scores = (final_scores - s_min) / (s_max - s_min)
+        else:
+            final_scores = np.linspace(1.0, 0.01, len(final_scores))
+
+        # Re-enforce monotonicity after calibration
+        for i in range(1, len(final_scores)):
+            if final_scores[i] > final_scores[i - 1]:
+                final_scores[i] = final_scores[i - 1]
+
+        # Generate reasoning & build rows
+        logger.info("  Generating reasoning for %d candidates…", len(final_candidates))
+        rows = []
+        for rank, (cand, score, sig) in enumerate(
+            zip(final_candidates, final_scores, final_signals), start=1
+        ):
+            reasoning = generate_reasoning(
+                cand, sig, rank, float(score), self.jd_requirements
+            )
+            rows.append({
+                "candidate_id": cand.candidate_id,
+                "rank": rank,
+                "score": round(float(score), 6),
+                "reasoning": reasoning,
             })
 
+        # Pad to exactly 100 rows if we somehow got fewer
+        if len(rows) < final_top_k:
+            logger.warning(
+                "Only %d candidates in output — padding to %d",
+                len(rows), final_top_k,
+            )
+            # This shouldn't happen with 100K candidates, but be safe
+            seen_ids = {r["candidate_id"] for r in rows}
+            pad_rank = len(rows) + 1
+            for cand in all_candidates:
+                if cand.candidate_id not in seen_ids and pad_rank <= final_top_k:
+                    rows.append({
+                        "candidate_id": cand.candidate_id,
+                        "rank": pad_rank,
+                        "score": round(0.001 / pad_rank, 6),
+                        "reasoning": (
+                            f"{cand.current_title} at {cand.current_company}; "
+                            "insufficient signal match for this role."
+                        ),
+                    })
+                    pad_rank += 1
+                    if pad_rank > final_top_k:
+                        break
+
         # Write CSV
-        self._write_submission(output_rows, output_path)
+        _write_submission(rows, output_path)
 
-        elapsed = time.time() - start_time
-        logger.info("=" * 60)
-        logger.info(f"Ranking complete in {elapsed:.1f}s")
-        logger.info(f"Output written to: {output_path}")
-        logger.info("=" * 60)
-
-    def _build_jd_text(self) -> str:
-        req = self.jd_requirements
-        parts = [
-            "Senior AI Engineer Founding Team",
-            "Production embeddings retrieval ranking vector search",
-            "Python FAISS Pinecone Weaviate Qdrant Milvus",
-            "Sentence-transformers BGE E5 semantic search",
-            "Learning to rank NDCG MRR MAP A/B testing",
-            "Product company experience shipped to real users",
-            "5-9 years experience",
-            "Pune Noida Hyderabad Mumbai Delhi NCR"
-        ]
-        if req.must_have_skills:
-            parts.append(" ".join(req.must_have_skills))
-        if req.nice_to_have_skills:
-            parts.append(" ".join(req.nice_to_have_skills))
-        return " ".join(parts)
-
-    def _write_submission(self, rows: List[Dict], output_path: str):
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=['candidate_id', 'rank', 'score', 'reasoning'])
-            writer.writeheader()
-            writer.writerows(rows)
+        elapsed = time.time() - wall_start
+        logger.info("=" * 65)
+        logger.info("  Ranking complete in %.1fs (%.1f min)", elapsed, elapsed / 60)
+        logger.info("  Output: %s", output_path)
+        logger.info("=" * 65)
 
 
-def run_ranking(candidates_path: str, jd_path: str, output_path: str,
-                cache_dir: str = 'models', force_recompute: bool = False,
-                final_top_k: int = 100, stage1_top_k: int = 500):
-    """Entry point for programmatic use."""
+# ---------------------------------------------------------------------------
+# CSV writer
+# ---------------------------------------------------------------------------
+
+def _write_submission(rows: List[Dict], output_path: str) -> None:
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["candidate_id", "rank", "score", "reasoning"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    logger.info("Wrote %d rows to %s", len(rows), output_path)
+
+
+# ---------------------------------------------------------------------------
+# Public API for programmatic use
+# ---------------------------------------------------------------------------
+
+def run_ranking(
+    candidates_path: str,
+    jd_path: str,
+    output_path: str,
+    cache_dir: str = "models",
+    force_recompute: bool = False,
+    final_top_k: int = _FINAL_TOP_K,
+    stage1_top_k: int = _STAGE1_TOP_K,
+) -> None:
+    """Programmatic entry point — mirrors rank.py CLI."""
     ranker = Ranker(jd_path, candidates_path, cache_dir)
     ranker.run(output_path, force_recompute, final_top_k, stage1_top_k)
 
 
-def main():
+# ---------------------------------------------------------------------------
+# CLI entry point (also called by python -m ranker)
+# ---------------------------------------------------------------------------
+
+def main() -> None:
     import argparse
-    parser = argparse.ArgumentParser(description='Redrob Candidate Ranker')
-    parser.add_argument('--candidates', required=True, help='Path to candidates.jsonl or .gz')
-    parser.add_argument('--jd', default='../Dataset/job_description.docx', help='Path to job description')
-    parser.add_argument('--out', required=True, help='Output CSV path')
-    parser.add_argument('--force-recompute', action='store_true', help='Force recompute embeddings')
-    parser.add_argument('--cache-dir', default='models', help='Cache directory')
-    parser.add_argument('--top-k', type=int, default=100, help='Number of candidates to rank')
-    parser.add_argument('--stage1-k', type=int, default=500, help='Stage 1 candidates to advance')
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(
+        description="Redrob Intelligent Candidate Discovery & Ranking"
+    )
+    parser.add_argument("--candidates", required=True, help="candidates.jsonl or .jsonl.gz")
+    parser.add_argument("--jd", default="../Dataset/job_description.docx",
+                        help="Path to job description (.docx / .md / .txt)")
+    parser.add_argument("--out", default="submission.csv", help="Output CSV path")
+    parser.add_argument("--cache-dir", default="models", help="Cache directory")
+    parser.add_argument("--force-recompute", action="store_true",
+                        help="Force re-embedding (ignore cache)")
+    parser.add_argument("--top-k", type=int, default=_FINAL_TOP_K,
+                        help="Number of candidates in final output (default 100)")
+    parser.add_argument("--stage1-k", type=int, default=_STAGE1_TOP_K,
+                        help="Candidates advanced to reranking stage (default 500)")
 
     args = parser.parse_args()
 
+    candidates_path = Path(args.candidates)
+    jd_path = Path(args.jd)
+
+    if not candidates_path.exists():
+        logger.error("Candidates file not found: %s", candidates_path)
+        sys.exit(1)
+    if not jd_path.exists():
+        logger.error("JD file not found: %s", jd_path)
+        sys.exit(1)
+
     run_ranking(
-        candidates_path=args.candidates,
-        jd_path=args.jd,
+        candidates_path=str(candidates_path),
+        jd_path=str(jd_path),
         output_path=args.out,
         cache_dir=args.cache_dir,
         force_recompute=args.force_recompute,
         final_top_k=args.top_k,
-        stage1_top_k=args.stage1_k
+        stage1_top_k=args.stage1_k,
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
