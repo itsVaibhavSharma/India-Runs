@@ -1,18 +1,29 @@
-"""Candidate Loader - Streams and parses candidate JSONL with signal extraction."""
+"""Candidate Loader — Streams and parses candidate JSONL files.
 
-import json
+Supports both plain .jsonl and gzipped .jsonl.gz formats.
+Produces Candidate objects that the signal extractors can consume directly.
+"""
+
+from __future__ import annotations
+
 import gzip
+import json
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Iterator, Any
 from pathlib import Path
-from datetime import datetime
-import numpy as np
+from typing import Any, Dict, Iterator, List, Optional
+import logging
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Data classes (match the candidate_schema.json spec exactly)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Skill:
     name: str
-    proficiency: str
+    proficiency: str          # beginner / intermediate / advanced / expert
     endorsements: int
     duration_months: int
 
@@ -38,7 +49,7 @@ class EducationEntry:
     start_year: int
     end_year: int
     grade: Optional[str]
-    tier: str
+    tier: str                 # tier_1 / tier_2 / tier_3 / tier_4 / unknown
 
 
 @dataclass
@@ -80,194 +91,192 @@ class Candidate:
     redrob_signals: RedrobSignals
     _text_for_embedding: str = field(default="", repr=False)
 
+    # ------------------------------------------------------------------
+    # Convenience property accessors (read from profile dict)
+    # ------------------------------------------------------------------
+
     @property
     def years_of_experience(self) -> float:
-        return self.profile.get('years_of_experience', 0.0)
+        return float(self.profile.get("years_of_experience", 0.0) or 0.0)
 
     @property
     def current_title(self) -> str:
-        return self.profile.get('current_title', '')
+        return self.profile.get("current_title", "") or ""
 
     @property
     def current_company(self) -> str:
-        return self.profile.get('current_company', '')
+        return self.profile.get("current_company", "") or ""
 
     @property
     def current_industry(self) -> str:
-        return self.profile.get('current_industry', '')
+        return self.profile.get("current_industry", "") or ""
 
     @property
     def location(self) -> str:
-        return self.profile.get('location', '')
+        return self.profile.get("location", "") or ""
 
     @property
     def country(self) -> str:
-        return self.profile.get('country', '')
+        return self.profile.get("country", "") or ""
 
     @property
     def summary(self) -> str:
-        return self.profile.get('summary', '')
+        return self.profile.get("summary", "") or ""
 
     @property
     def headline(self) -> str:
-        return self.profile.get('headline', '')
+        return self.profile.get("headline", "") or ""
 
+    @property
+    def anonymized_name(self) -> str:
+        return self.profile.get("anonymized_name", "") or ""
+
+
+# ---------------------------------------------------------------------------
+# CandidateLoader
+# ---------------------------------------------------------------------------
 
 class CandidateLoader:
-    PROFICIENCY_WEIGHTS = {
-        'beginner': 0.2,
-        'intermediate': 0.5,
-        'advanced': 0.8,
-        'expert': 1.0
-    }
-
-    SERVICE_INDUSTRIES = {
-        'it services', 'consulting', 'outsourcing', 'system integrator',
-        'managed services', 'professional services', 'staffing'
-    }
-
-    CONSULTING_FIRMS = {
-        'tcs', 'infosys', 'wipro', 'cognizant', 'capgemini', 'accenture',
-        'hcl', 'tech mahindra', 'lti', 'mindtree', 'mphasis', 'hexaware',
-        'l&t infotech', 'zensar', 'ntt data', 'cgi', 'virtusa', 'synechron'
-    }
+    """Streams and parses candidates from a JSONL (or gzipped JSONL) file."""
 
     def __init__(self, candidates_path: str):
         self.candidates_path = Path(candidates_path)
 
-    def _parse_skill(self, skill_data: Dict[str, Any]) -> Skill:
+    # ------------------------------------------------------------------
+    # Parsers
+    # ------------------------------------------------------------------
+
+    def _parse_skill(self, data: Dict[str, Any]) -> Skill:
         return Skill(
-            name=skill_data.get('name', ''),
-            proficiency=skill_data.get('proficiency', 'beginner'),
-            endorsements=skill_data.get('endorsements', 0),
-            duration_months=skill_data.get('duration_months', 0)
+            name=data.get("name", "") or "",
+            proficiency=data.get("proficiency", "beginner") or "beginner",
+            endorsements=int(data.get("endorsements", 0) or 0),
+            duration_months=int(data.get("duration_months", 0) or 0),
         )
 
-    def _parse_career(self, career_data: Dict[str, Any]) -> CareerEntry:
+    def _parse_career(self, data: Dict[str, Any]) -> CareerEntry:
         return CareerEntry(
-            company=career_data.get('company', ''),
-            title=career_data.get('title', ''),
-            start_date=career_data.get('start_date', ''),
-            end_date=career_data.get('end_date'),
-            duration_months=career_data.get('duration_months', 0),
-            is_current=career_data.get('is_current', False),
-            industry=career_data.get('industry', ''),
-            company_size=career_data.get('company_size', ''),
-            description=career_data.get('description', '')
+            company=data.get("company", "") or "",
+            title=data.get("title", "") or "",
+            start_date=data.get("start_date", "") or "",
+            end_date=data.get("end_date"),
+            duration_months=int(data.get("duration_months", 0) or 0),
+            is_current=bool(data.get("is_current", False)),
+            industry=data.get("industry", "") or "",
+            company_size=data.get("company_size", "") or "",
+            description=data.get("description", "") or "",
         )
 
-    def _parse_education(self, edu_data: Dict[str, Any]) -> EducationEntry:
+    def _parse_education(self, data: Dict[str, Any]) -> EducationEntry:
         return EducationEntry(
-            institution=edu_data.get('institution', ''),
-            degree=edu_data.get('degree', ''),
-            field_of_study=edu_data.get('field_of_study', ''),
-            start_year=edu_data.get('start_year', 0),
-            end_year=edu_data.get('end_year', 0),
-            grade=edu_data.get('grade'),
-            tier=edu_data.get('tier', 'unknown')
+            institution=data.get("institution", "") or "",
+            degree=data.get("degree", "") or "",
+            field_of_study=data.get("field_of_study", "") or "",
+            start_year=int(data.get("start_year", 0) or 0),
+            end_year=int(data.get("end_year", 0) or 0),
+            grade=data.get("grade"),
+            tier=data.get("tier", "unknown") or "unknown",
         )
 
-    def _parse_signals(self, signals_data: Dict[str, Any]) -> RedrobSignals:
+    def _parse_signals(self, data: Dict[str, Any]) -> RedrobSignals:
+        sal = data.get("expected_salary_range_inr_lpa", {}) or {}
         return RedrobSignals(
-            profile_completeness_score=signals_data.get('profile_completeness_score', 0.0),
-            signup_date=signals_data.get('signup_date', ''),
-            last_active_date=signals_data.get('last_active_date', ''),
-            open_to_work_flag=signals_data.get('open_to_work_flag', False),
-            profile_views_received_30d=signals_data.get('profile_views_received_30d', 0),
-            applications_submitted_30d=signals_data.get('applications_submitted_30d', 0),
-            recruiter_response_rate=signals_data.get('recruiter_response_rate', 0.0),
-            avg_response_time_hours=signals_data.get('avg_response_time_hours', 0.0),
-            skill_assessment_scores=signals_data.get('skill_assessment_scores', {}),
-            connection_count=signals_data.get('connection_count', 0),
-            endorsements_received=signals_data.get('endorsements_received', 0),
-            notice_period_days=signals_data.get('notice_period_days', 0),
-            expected_salary_range_inr_lpa=signals_data.get('expected_salary_range_inr_lpa', {'min': 0, 'max': 0}),
-            preferred_work_mode=signals_data.get('preferred_work_mode', 'flexible'),
-            willing_to_relocate=signals_data.get('willing_to_relocate', False),
-            github_activity_score=signals_data.get('github_activity_score', -1.0),
-            search_appearance_30d=signals_data.get('search_appearance_30d', 0),
-            saved_by_recruiters_30d=signals_data.get('saved_by_recruiters_30d', 0),
-            interview_completion_rate=signals_data.get('interview_completion_rate', 0.0),
-            offer_acceptance_rate=signals_data.get('offer_acceptance_rate', -1.0),
-            verified_email=signals_data.get('verified_email', False),
-            verified_phone=signals_data.get('verified_phone', False),
-            linkedin_connected=signals_data.get('linkedin_connected', False)
+            profile_completeness_score=float(data.get("profile_completeness_score", 0.0) or 0.0),
+            signup_date=data.get("signup_date", "") or "",
+            last_active_date=data.get("last_active_date", "") or "",
+            open_to_work_flag=bool(data.get("open_to_work_flag", False)),
+            profile_views_received_30d=int(data.get("profile_views_received_30d", 0) or 0),
+            applications_submitted_30d=int(data.get("applications_submitted_30d", 0) or 0),
+            recruiter_response_rate=float(data.get("recruiter_response_rate", 0.0) or 0.0),
+            avg_response_time_hours=float(data.get("avg_response_time_hours", 0.0) or 0.0),
+            skill_assessment_scores=data.get("skill_assessment_scores", {}) or {},
+            connection_count=int(data.get("connection_count", 0) or 0),
+            endorsements_received=int(data.get("endorsements_received", 0) or 0),
+            notice_period_days=int(data.get("notice_period_days", 0) or 0),
+            expected_salary_range_inr_lpa={"min": float(sal.get("min", 0) or 0), "max": float(sal.get("max", 0) or 0)},
+            preferred_work_mode=data.get("preferred_work_mode", "flexible") or "flexible",
+            willing_to_relocate=bool(data.get("willing_to_relocate", False)),
+            github_activity_score=float(data.get("github_activity_score", -1.0) if data.get("github_activity_score") is not None else -1.0),
+            search_appearance_30d=int(data.get("search_appearance_30d", 0) or 0),
+            saved_by_recruiters_30d=int(data.get("saved_by_recruiters_30d", 0) or 0),
+            interview_completion_rate=float(data.get("interview_completion_rate", 0.0) or 0.0),
+            offer_acceptance_rate=float(data.get("offer_acceptance_rate", -1.0) if data.get("offer_acceptance_rate") is not None else -1.0),
+            verified_email=bool(data.get("verified_email", False)),
+            verified_phone=bool(data.get("verified_phone", False)),
+            linkedin_connected=bool(data.get("linkedin_connected", False)),
         )
 
     def _build_embedding_text(self, candidate: Candidate) -> str:
-        parts = []
+        """Builds the text used for semantic embedding from structured profile fields."""
+        parts: List[str] = []
+
+        # Profile narrative
         if candidate.summary:
             parts.append(candidate.summary)
         if candidate.headline:
             parts.append(candidate.headline)
+
+        # Career descriptions (rich signal for technical depth)
         for career in candidate.career_history:
             if career.description:
                 parts.append(career.description)
-        return ' '.join(parts)
+            # Also include job title + company for context
+            if career.title and career.company:
+                parts.append(f"{career.title} at {career.company}")
+
+        # Skill names (helps semantic matching to JD)
+        skill_names = [s.name for s in candidate.skills if s.name]
+        if skill_names:
+            parts.append("Skills: " + ", ".join(skill_names))
+
+        return " ".join(parts)
+
+    def _parse_candidate(self, data: Dict[str, Any]) -> Candidate:
+        candidate = Candidate(
+            candidate_id=data.get("candidate_id", "") or "",
+            profile=data.get("profile", {}) or {},
+            career_history=[self._parse_career(c) for c in data.get("career_history", [])],
+            education=[self._parse_education(e) for e in data.get("education", [])],
+            skills=[self._parse_skill(s) for s in data.get("skills", [])],
+            certifications=data.get("certifications", []) or [],
+            languages=data.get("languages", []) or [],
+            redrob_signals=self._parse_signals(data.get("redrob_signals", {}) or {}),
+        )
+        candidate._text_for_embedding = self._build_embedding_text(candidate)
+        return candidate
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def _open_file(self):
+        """Returns a file-like object for reading the candidates file."""
+        if self.candidates_path.suffix == ".gz":
+            return gzip.open(self.candidates_path, "rt", encoding="utf-8")
+        return open(self.candidates_path, "r", encoding="utf-8")
 
     def load_candidates(self) -> Iterator[Candidate]:
-        if self.candidates_path.suffix == '.gz':
-            opener = gzip.open
-            mode = 'rt'
-        else:
-            opener = open
-            mode = 'r'
-
-        with opener(self.candidates_path, mode, encoding='utf-8') as f:
+        """Stream candidates one at a time (memory-efficient)."""
+        with self._open_file() as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     data = json.loads(line)
-                    candidate = self._parse_candidate(data)
-                    yield candidate
-                except json.JSONDecodeError as e:
-                    print(f"Warning: Failed to parse line {line_num}: {e}")
-                    continue
-
-    def _parse_candidate(self, data: Dict[str, Any]) -> Candidate:
-        candidate = Candidate(
-            candidate_id=data.get('candidate_id', ''),
-            profile=data.get('profile', {}),
-            career_history=[self._parse_career(c) for c in data.get('career_history', [])],
-            education=[self._parse_education(e) for e in data.get('education', [])],
-            skills=[self._parse_skill(s) for s in data.get('skills', [])],
-            certifications=data.get('certifications', []),
-            languages=data.get('languages', []),
-            redrob_signals=self._parse_signals(data.get('redrob_signals', {}))
-        )
-        candidate._text_for_embedding = self._build_embedding_text(candidate)
-        return candidate
+                    yield self._parse_candidate(data)
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    logger.warning("Skipping line %d: %s", line_num, exc)
 
     def load_all_candidates(self) -> List[Candidate]:
+        """Load all candidates into memory. Use only when RAM allows."""
         return list(self.load_candidates())
 
     def count_candidates(self) -> int:
+        """Count lines without parsing."""
         count = 0
-        if self.candidates_path.suffix == '.gz':
-            opener = gzip.open
-            mode = 'rt'
-        else:
-            opener = open
-            mode = 'r'
-
-        with opener(self.candidates_path, mode, encoding='utf-8') as f:
+        with self._open_file() as f:
             for line in f:
                 if line.strip():
                     count += 1
         return count
-
-    def is_service_company(self, company: str) -> bool:
-        company_lower = company.lower()
-        return any(firm in company_lower for firm in self.CONSULTING_FIRMS)
-
-    def is_service_industry(self, industry: str) -> bool:
-        industry_lower = industry.lower()
-        return any(svc in industry_lower for svc in self.SERVICE_INDUSTRIES)
-
-    def get_skill_trust_score(self, skill: Skill) -> float:
-        endorsement_factor = min(1.0, skill.endorsements / 10.0)
-        duration_factor = min(1.0, skill.duration_months / 24.0)
-        proficiency_weight = self.PROFICIENCY_WEIGHTS.get(skill.proficiency, 0.2)
-        return endorsement_factor * duration_factor * proficiency_weight
