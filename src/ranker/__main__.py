@@ -1,11 +1,11 @@
 """Main Ranker Pipeline — Two-stage candidate ranking for the Redrob challenge.
 
 Stage 0: Parse JD → structured requirements
-Stage 1: Load all 100K candidates, extract 7 signals, apply behavioral gate
-Stage 2: Semantic similarity filtering → top-500 advance
-Stage 3: Signal fusion + calibration → final scores
+Stage 1: Load all 100K candidates, extract 7 signals (NO hard behavioral gate)
+Stage 2: Top-500 by composite (50% semantic + 15% title + 12% skill + 10% exp + 8% behavioral)
+Stage 3: Signal fusion (LogisticRegression + IsotonicRegression) + calibration
 Stage 4: Honeypot penalty enforcement
-Stage 5: Sort, generate per-candidate reasoning, write submission.csv
+Stage 5: Sort by score desc + candidate_id asc, generate reasoning, write submission.csv
 
 All computation is CPU-only.  No network calls are made during ranking.
 Pre-computed artifacts (candidate embeddings, fusion model) are loaded
@@ -70,6 +70,18 @@ def _build_jd_query_text(req: JDRequirements) -> str:
     if req.nice_to_have_skills:
         parts.append(" ".join(req.nice_to_have_skills[:5]))
     return " ".join(parts)
+
+
+def _days_since(date_str: Optional[str]) -> int:
+    """Return number of days since *date_str* (ISO-8601). Returns 9999 on failure."""
+    if not date_str:
+        return 9999
+    try:
+        import datetime
+        d = datetime.date.fromisoformat(str(date_str)[:10])
+        return max(0, (datetime.date.today() - d).days)
+    except Exception:
+        return 9999
 
 
 # ---------------------------------------------------------------------------
@@ -148,66 +160,95 @@ class Ranker:
         id_to_idx: Dict[str, int] = {cid: i for i, cid in enumerate(candidate_ids)}
 
         # ----------------------------------------------------------------
-        # Stage 1b: Signal extraction + behavioral gate
+        # Stage 1b: Signal extraction (ALL candidates — no hard gate)
         # ----------------------------------------------------------------
         logger.info("[Stage 1b] Extracting signals for all candidates…")
         signal_extractor = SignalExtractor(self.jd_requirements)
 
+        all_signals_list: List[Dict[str, float]] = []
+        all_scores_list:  List[SignalScores] = []
         valid_candidates: List[Candidate] = []
-        valid_signals: List[Dict[str, float]] = []
-        valid_emb_indices: List[int] = []   # index into candidate_embeddings
+        valid_emb_indices: List[int] = []
 
+        n_hard_excluded = 0
         for candidate in tqdm(all_candidates, desc="Signal extraction", unit="cand"):
             scores: SignalScores = signal_extractor.extract_all_signals(candidate)
 
-            # BEHAVIORAL GATE: completely inactive candidates are excluded
-            # (they're ranked lower in ground truth regardless of skills)
-            if scores.behavioral == 0.0:
+            # Hard-exclude only extreme honeypots (fabricated profiles)
+            if scores.honeypot_penalty >= 0.95:
+                n_hard_excluded += 1
                 continue
 
-            # Early honeypot hard-exclude (extreme cases)
-            if scores.honeypot_penalty >= 0.95:
+            # Hard-exclude completely ghost candidates:
+            # open_to_work=False AND inactive >180d AND response_rate=0
+            sig = candidate.redrob_signals
+            days_inactive = _days_since(sig.last_active_date) or 9999
+            is_ghost = (
+                not sig.open_to_work_flag
+                and days_inactive > 180
+                and sig.recruiter_response_rate == 0.0
+            )
+            if is_ghost:
+                n_hard_excluded += 1
                 continue
 
             idx = id_to_idx.get(candidate.candidate_id, -1)
             if idx == -1:
-                continue   # embedding not found for this candidate
+                continue
 
-            sig_dict = scores.to_dict()
             valid_candidates.append(candidate)
-            valid_signals.append(sig_dict)
+            all_signals_list.append(scores.to_dict())
+            all_scores_list.append(scores)
             valid_emb_indices.append(idx)
 
         logger.info(
-            "  Candidates passing behavioral gate: %d / %d",
-            len(valid_candidates), len(all_candidates),
+            "  Signals extracted: %d / %d  (hard-excluded: %d honeypots/ghosts)",
+            len(valid_candidates), len(all_candidates), n_hard_excluded,
         )
 
         # ----------------------------------------------------------------
-        # Stage 2: Semantic similarity filtering → top-K
+        # Stage 2: Semantic similarity + signal composite → top-K
         # ----------------------------------------------------------------
         logger.info("[Stage 2] Semantic similarity filtering (top %d)…", stage1_top_k)
         jd_text = _build_jd_query_text(self.jd_requirements)
         jd_embedding = emb_manager.get_jd_embedding(jd_text)
 
-        valid_emb_matrix = candidate_embeddings[valid_emb_indices]  # (N, 384)
+        valid_emb_matrix = candidate_embeddings[valid_emb_indices]
         similarities = emb_manager.compute_similarities(jd_embedding, valid_emb_matrix)
 
-        # Compute a quick composite for stage-1 filtering
-        # (80% semantic + 20% behavioral gate hint — keep it fast)
-        behavioral_arr = np.array([s["behavioral"] for s in valid_signals], dtype=np.float32)
-        quick_score = similarities * 0.80 + behavioral_arr * 0.20
+        # Stage-1 composite score:
+        #   50% semantic similarity (JD query match)
+        #   15% title/career signal  (most discriminative for role fit)
+        #   12% skill depth          (endorsement-weighted tech skills)
+        #   10% experience           (years-of-experience fit)
+        #    8% behavioral           (availability/engagement — softer now)
+        #    5% honeypot penalty     (negative)
+        title_arr    = np.array([s["title_career"]     for s in all_signals_list], dtype=np.float32)
+        skill_arr    = np.array([s["skill_depth"]       for s in all_signals_list], dtype=np.float32)
+        exp_arr      = np.array([s["experience"]        for s in all_signals_list], dtype=np.float32)
+        behav_arr    = np.array([s["behavioral"]        for s in all_signals_list], dtype=np.float32)
+        hp_arr       = np.array([s["honeypot_penalty"]  for s in all_signals_list], dtype=np.float32)
 
-        # Select top-K by quick score
-        top_k = min(stage1_top_k, len(quick_score))
+        quick_score = (
+            similarities * 0.50 +
+            title_arr    * 0.15 +
+            skill_arr    * 0.12 +
+            exp_arr      * 0.10 +
+            behav_arr    * 0.08 -
+            hp_arr       * 0.05
+        )
+
+        # Select top-K by quick composite
+        top_k   = min(stage1_top_k, len(quick_score))
         top_idx = np.argpartition(quick_score, -top_k)[-top_k:]
         top_idx = top_idx[np.argsort(quick_score[top_idx])[::-1]]
 
         stage2_candidates = [valid_candidates[i] for i in top_idx]
-        stage2_signals    = [valid_signals[i]    for i in top_idx]
+        stage2_signals    = [all_signals_list[i]  for i in top_idx]
         stage2_sims       = similarities[top_idx]
 
         logger.info("  Advanced to stage-2 reranking: %d", len(stage2_candidates))
+
 
         # ----------------------------------------------------------------
         # Stage 3: Signal fusion + calibration
@@ -290,62 +331,54 @@ class Ranker:
                 "reasoning": reasoning,
             })
 
-        # Pad to exactly final_top_k rows if we have fewer (should not happen with 100K candidates)
+        # Pad to exactly final_top_k rows if we have fewer
+        # With 100K candidates this should rarely trigger.
         if len(rows) < final_top_k:
             logger.warning(
-                "Only %d candidates available — padding to %d with best remaining candidates",
+                "Only %d candidates in submission — padding to %d with best remaining",
                 len(rows), final_top_k,
             )
             seen_ids = {r["candidate_id"] for r in rows}
-            pad_rank = len(rows) + 1
 
-            # Use last scored row's score as base (avoid 0.0 which causes inversions)
-            # Find the last non-zero score, or use a small default
-            last_nonzero = next(
-                (r["score"] for r in reversed(rows) if r["score"] > 0), 0.010
-            )
-            base_score = max(0.001, last_nonzero)
+            # Reuse already-extracted signals from valid_candidates / all_signals_list
+            # (avoids redundant signal extraction)
+            remaining_pairs = [
+                (cand, sig)
+                for cand, sig in zip(valid_candidates, all_signals_list)
+                if cand.candidate_id not in seen_ids
+            ]
 
-            # Build a quick score for ALL remaining candidates using signal extraction
-            remaining = [c for c in all_candidates if c.candidate_id not in seen_ids]
-
-            # Quick-score remaining candidates by basic signal composite
-            scored_remaining = []
-            for cand in remaining:
-                try:
-                    sig: SignalScores = signal_extractor.extract_all_signals(cand)
-                    quick = (
-                        sig.title_career * 0.30 +
-                        sig.skill_depth   * 0.25 +
-                        sig.experience    * 0.20 +
-                        sig.education     * 0.10 +
-                        sig.location      * 0.05 +
-                        sig.behavioral    * 0.10 -
-                        sig.honeypot_penalty * 0.15
+            # Score remaining by signal composite + tie-break by id
+            scored_remaining = sorted(
+                [
+                    (
+                        sig["title_career"] * 0.30 +
+                        sig["skill_depth"]   * 0.25 +
+                        sig["experience"]    * 0.20 +
+                        sig["education"]     * 0.10 +
+                        sig["location"]      * 0.05 +
+                        sig["behavioral"]    * 0.10 -
+                        sig["honeypot_penalty"] * 0.15,
+                        cand.candidate_id,
+                        cand,
+                        sig,
                     )
-                    scored_remaining.append((quick, cand.candidate_id, cand, sig.to_dict()))
-                except Exception:
-                    scored_remaining.append((0.0, cand.candidate_id, cand, {}))
+                    for cand, sig in remaining_pairs
+                ],
+                key=lambda x: (-x[0], x[1]),
+            )
 
-            # Sort by descending quick score, then by candidate_id ascending (tie-break)
-            scored_remaining.sort(key=lambda x: (-x[0], x[1]))
+            pad_rank = len(rows) + 1
+            last_nonzero = next((r["score"] for r in reversed(rows) if r["score"] > 0), 0.010)
+            base_score = max(0.001, last_nonzero)
+            n_needed   = min(len(scored_remaining), final_top_k - len(rows))
 
-            # Pre-calculate strictly decreasing unique scores for all padding candidates
-            # Use linear interpolation from base_score down to ~0.000001
-            n_remaining = len(scored_remaining)
-            n_needed = min(n_remaining, final_top_k - len(rows))
             if n_needed > 0:
-                # Distribute scores linearly from base_score → 0.000001
-                # Do NOT cap against rows[-1]["score"] here — that score may be 0.0
-                # (candidates that passed gate but scored low after calibration).
-                # The final monotonicity sweep below will correct any remaining issues.
                 step_size = (base_score - 0.000001) / max(n_needed, 1)
                 for idx, (_, _, cand, sig_dict) in enumerate(scored_remaining[:n_needed]):
                     pad_score = round(base_score - (idx + 1) * step_size, 6)
                     pad_score = max(0.000001, pad_score)
-
                     reasoning = generate_reasoning(cand, sig_dict, pad_rank, pad_score, self.jd_requirements)
-
                     rows.append({
                         "candidate_id": cand.candidate_id,
                         "rank": pad_rank,
