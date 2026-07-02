@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """
-Redrob Candidate Ranker - Main Entry Point
+Redrob Candidate Ranker — Main Entry Point
 
 Usage:
     python rank.py --candidates path/to/candidates.jsonl --out submission.csv
     python rank.py --candidates path/to/candidates.jsonl --jd path/to/jd.docx --out submission.csv
+
+Pre-computation (run once before ranking):
+    python precompute.py --candidates path/to/candidates.jsonl --jd path/to/jd.docx
 """
+
+# ── Suppress TF/GPU BEFORE any ML import ─────────────────────────────────────
+import os
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
 import logging

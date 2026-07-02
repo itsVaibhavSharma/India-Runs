@@ -73,6 +73,12 @@ class EmbeddingManager:
         if self._model is not None:
             return
 
+        import os
+        # Suppress TensorFlow loading (we use PyTorch only)
+        os.environ.setdefault("USE_TF", "0")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
         from sentence_transformers import SentenceTransformer
 
         if self.model_dir.exists() and any(self.model_dir.iterdir()):

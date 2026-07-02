@@ -1,212 +1,162 @@
 # Redrob Intelligent Candidate Discovery & Ranking
 
 **Team:** ThreeTwoOne  
-**Leader:** Vaibhav Sharma  
-**Track:** Intelligent Candidate Discovery & Ranking Challenge
-
----
-
-## Overview
-
-A CPU-only, two-stage candidate ranking system that goes beyond keyword matching to understand context, evaluate behavioral signals, and detect honeypots. Designed for the Redrob Hackathon constraints: 5-min runtime, 16GB RAM, CPU-only, no network.
-
-### Key Features
-
-- **Hybrid Scoring**: 7 independent signals (title/career, skill depth, experience, education, location, behavioral, honeypot penalty)
-- **Semantic Understanding**: Sentence-transformer embeddings for JD-candidate matching
-- **Behavioral Gating**: Filters inactive/unresponsive candidates early (JD requirement: "active on platform")
-- **Honeypot Detection**: Timeline inconsistency, skill inflation, company-age mismatch detection
-- **Explainable Output**: Per-candidate reasoning with specific facts, JD connections, and honest concerns
-- **CPU Optimized**: Runs in ~3 minutes on 100K candidates with pre-computed embeddings
+**Members:** Vaibhav Sharma (Lead) · Shreya Khantal  
+**Challenge:** Redrob Hackathon 2026 — Track 1: Intelligent Candidate Ranking
 
 ---
 
 ## Quick Start
 
-### Installation
-
+### Step 1 — Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### Pre-computation (One-time)
-
+### Step 2 — Pre-compute (one-time, ~45 minutes for 100K candidates)
 ```bash
-# Compute embeddings for all 100K candidates (run once)
-python -c "
-from src.ranker.embeddings import EmbeddingManager
-from src.ranker.candidate_loader import CandidateLoader
-loader = CandidateLoader('../Dataset/candidates.jsonl')
-candidates = loader.load_all_candidates()
-mgr = EmbeddingManager()
-mgr.get_candidate_embeddings(candidates)
-print('Embeddings cached!')
-"
+python precompute.py \
+  --candidates ./candidates.jsonl \
+  --jd ./job_description.docx
+```
+This downloads the embedding model locally and pre-computes all 100K candidate embeddings. After this step, no network access is needed.
 
-# Train fusion model (run once)
-python -c "
-from src.ranker.fusion import SignalFusion
-from src.ranker.jd_parser import parse_jd
-req = parse_jd('../Dataset/job_description.docx')
-fusion = SignalFusion()
-fusion.train(req)
-print('Fusion model trained!')
-"
+### Step 3 — Rank candidates (~3 minutes, no network)
+```bash
+python rank.py \
+  --candidates ./candidates.jsonl \
+  --jd ./job_description.docx \
+  --out ./submission.csv
 ```
 
-### Ranking
-
+### Step 4 — Validate submission
 ```bash
-# Full ranking (produces submission.csv)
-python rank.py --candidates ../Dataset/candidates.jsonl --out submission.csv
-
-# With custom paths
-python rank.py --candidates path/to/candidates.jsonl --jd path/to/jd.docx --out submission.csv
-```
-
-### Validate Submission
-
-```bash
-python ../Dataset/validate_submission.py submission.csv
+python validate_submission.py ./submission.csv
 ```
 
 ---
 
 ## Architecture
 
+Two-stage CPU-only ranking pipeline:
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        100,000 Candidates                        │
-└──────────────────────────┬──────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE 1: Fast Filtering (~2.5 min)                              │
-│ • Load candidates, extract 7 signals per candidate              │
-│ • Behavioral availability gate (open_to_work, recent activity,  │
-│   response_rate > 10%)                                          │
-│ • Honeypot detection (timeline, skill inflation, salary/exp)    │
-│ • Semantic similarity (pre-computed embeddings)                 │
-│ • Top 500 advance                                               │
-└──────────────────────────┬──────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ STAGE 2: Calibrated Reranking (~30 sec)                         │
-│ • Signal fusion: LogisticRegression + Isotonic calibration      │
-│ • Trained on synthetic pairs from JD requirements               │
-│ • Combined with similarity score (90/10)                        │
-│ • Honeypot penalty enforcement                                  │
-│ • Monotonic score enforcement                                   │
-│ • Template-based reasoning generation                           │
-└──────────────────────────┬──────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ OUTPUT: submission.csv (top 100)                                │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Signal Details
-
-| Signal | Weight | Description |
-|--------|--------|-------------|
-| **Title/Career** | ~25% | Current title match, production evidence, ranking/retrieval experience, product vs services company |
-| **Skill Depth** | ~20% | Trust-weighted skills (endorsements × duration × proficiency), 3x multiplier for required tech |
-| **Experience** | ~15% | Years in [5,9] optimal, decays outside range |
-| **Education** | ~5% | Tier-1 institution + CS/ML field bonus |
-| **Location** | ~5% | Pune/Noida/Hyderabad/Mumbai/Delhi NCR preferred, relocation friendly |
-| **Behavioral** | ~15% | **Multiplicative gate**: must have open_to_work + recent activity + response_rate > 10% |
-| **Honeypot Penalty** | ~15% | Timeline impossibility, expert skill inflation, company-age mismatch, salary/exp mismatch |
-
----
-
-## Requirements
-
-- Python 3.10+
-- 16 GB RAM
-- CPU only (no GPU required)
-- ~5 GB disk for cached embeddings
-
-Dependencies in `requirements.txt`:
-- numpy, pandas, scikit-learn
-- sentence-transformers (all-MiniLM-L6-v2, 384-dim)
-- torch (CPU)
-- python-docx, PyYAML, tqdm
-
----
-
-## Output Format
-
-`submission.csv` with columns:
-- `candidate_id`: CAND_XXXXXXX
-- `rank`: 1-100 (unique)
-- `score`: float, non-increasing with rank
-- `reasoning`: 1-2 sentence justification with specific facts
-
-Example:
-```csv
-candidate_id,rank,score,reasoning
-CAND_0042871,1,0.987,"Senior AI Engineer at Swiggy (product) with 6.2 yrs; built embedding-based retrieval for food recommendations using FAISS + sentence-transformers; strong Python (GitHub: 42); recent active (last_active: 2026-06-15); concern: 90-day notice period"
+candidates.jsonl (100K)
+        │
+        ▼
+┌───────────────────────────────────────────────────┐
+│  Stage 1: Signal Extraction + Behavioral Gate    │
+│  • 7 signals per candidate (see below)           │
+│  • Hard filter: open_to_work + ≤60d + >10% resp │
+│  • Semantic similarity via pre-computed embeddings│
+│  • Top 500 advance                               │
+└──────────────────────┬────────────────────────────┘
+                       │
+                       ▼
+┌───────────────────────────────────────────────────┐
+│  Stage 2: Signal Fusion + Reranking              │
+│  • LogisticRegression + IsotonicRegression       │
+│  • 7 signals + 4 interaction terms               │
+│  • 90% fusion + 10% semantic similarity          │
+│  • Honeypot penalty enforcement                  │
+│  • Score calibration to [0,1] + monotonic        │
+│  • Template-based factual reasoning              │
+└──────────────────────┬────────────────────────────┘
+                       │
+                       ▼
+        submission.csv (top 100 candidates)
 ```
 
+### The 7 Signals
+
+| # | Signal | Description |
+|---|--------|-------------|
+| 1 | `title_career` | Title match, production evidence, product vs services company |
+| 2 | `skill_depth` | Trust-weighted skill score (endorsements × duration × proficiency × JD multiplier) |
+| 3 | `experience` | Years-of-experience fit for the [5-9] target band |
+| 4 | `education` | Institution tier (Tier-1/2/3) + field relevance + degree level |
+| 5 | `location` | Preferred city match (Pune/Noida=1.0, NCR=0.85) + relocation willingness |
+| 6 | `behavioral` | Availability gate (open_to_work + ≤60d active + >10% response) + engagement score |
+| 7 | `honeypot_penalty` | Timeline impossibility, skill inflation, company age mismatch, salary anomalies |
+
+### Honeypot Detection
+
+The dataset contains ~80 honeypot candidates with subtly impossible profiles.
+Our system detects them through:
+
+1. **Tenure > total experience** — impossible career timeline
+2. **Skill inflation** — expert proficiency in 10+ skills with <12 months duration
+3. **Company age mismatch** — claimed tenure longer than company has existed
+4. **Salary/experience mismatch** — <3 years requesting >40 LPA
+5. **Education anomalies** — graduation year in the future
+6. **Keyword stuffing** — AI skills on services background with no depth
+
+### Reasoning Quality
+
+All reasoning strings are template-filled from verified candidate fields only — no LLM inference, no hallucination. Each string includes:
+- Title / Company / Company type / Years of experience
+- Specific tech evidence from career descriptions
+- Behavioral signal (last active, response rate, GitHub)
+- Up to 3 specific concerns (notice period, services background, location)
+
 ---
 
-## Deployment (Streamlit)
+## File Structure
+
+```
+Implementation/
+├── rank.py                      # Main CLI entry point
+├── precompute.py                # One-time pre-computation script
+├── app.py                       # Streamlit demo app
+├── validate_submission.py       # Local submission validator (copy from Dataset/)
+├── requirements.txt
+├── submission_metadata.yaml
+├── README.md
+├── src/
+│   └── ranker/
+│       ├── __init__.py
+│       ├── __main__.py          # Pipeline orchestrator
+│       ├── candidate_loader.py  # JSONL/JSON/GZ reader
+│       ├── signals.py           # 7-signal extractor
+│       ├── embeddings.py        # Offline-first embedding manager
+│       ├── jd_parser.py         # JD requirements parser
+│       ├── fusion.py            # LogisticRegression fusion + calibration
+│       └── reasoning.py         # Template-based reasoning generator
+└── models/
+    ├── embedding_model/         # Saved sentence-transformers model (offline)
+    ├── embeddings/              # Pre-computed candidate embeddings (gitignored)
+    └── fusion/                  # Trained fusion model (committed, ~2KB)
+```
+
+---
+
+## Constraints Compliance
+
+| Constraint | Status |
+|-----------|--------|
+| CPU only | ✅ PyTorch CPU build, no CUDA |
+| No network during ranking | ✅ Model loaded from `models/embedding_model/` |
+| < 5 minutes for 100K | ✅ ~3 min (pre-computed embeddings) |
+| < 16 GB RAM | ✅ ~4 GB peak (100K × 384-dim float32 embeddings) |
+| Exactly 100 rows | ✅ Hard-enforced |
+| Ranks 1–100, unique | ✅ Validated |
+| Scores non-increasing | ✅ Monotonic enforcement + validation |
+| Tie-break by candidate_id ascending | ✅ Implemented |
+
+---
+
+## Sandbox / Demo
+
+The Streamlit app supports uploading any sample JSONL/JSON/GZ file (up to ~1000 candidates works best for demo) and runs the full pipeline end-to-end.
 
 ```bash
 streamlit run app.py
 ```
 
-Upload a candidates JSONL file (or sample) to see interactive ranking results.
+Or hosted at: [Streamlit Cloud Link]
 
 ---
 
-## Project Structure
+## AI Tools Declaration
 
-```
-Implementation/
-├── rank.py                    # Entry point
-├── app.py                     # Streamlit demo
-├── requirements.txt
-├── submission_metadata.yaml   # Hackathon metadata
-├── models/                    # Cached artifacts (git-lfs)
-│   ├── embeddings/
-│   │   ├── candidate_embeddings.npy
-│   │   ├── candidate_ids.pkl
-│   │   └── candidate_norms.npy
-│   └── fusion/
-│       ├── fusion_model.pkl
-│       ├── scaler.pkl
-│       ├── calibrator.pkl
-│       └── weights.npy
-├── src/
-│   └── ranker/
-│       ├── __init__.py
-│       ├── __main__.py        # Main pipeline
-│       ├── jd_parser.py       # JD requirement extraction
-│       ├── candidate_loader.py # JSONL streaming + parsing
-│       ├── signals.py         # 7 signal extractors
-│       ├── embeddings.py      # Embedding cache + similarity
-│       ├── fusion.py          # LogisticRegression + calibration
-│       └── reasoning.py       # Factual reasoning generator
-└── tests/
-    └── test_rank.py
-```
-
----
-
-## Hackathon Compliance
-
-✅ **Format**: CSV with candidate_id, rank, score, reasoning (100 rows)  
-✅ **Compute**: ≤5 min, ≤16 GB RAM, CPU-only, no network during ranking  
-✅ **No API calls**: All models local (sentence-transformers, sklearn)  
-✅ **Honeypot rate**: Conservative penalties, behavioral gate filters inactives  
-✅ **Reasoning**: Specific facts, JD-connected, honest concerns, varied templates  
-✅ **Reproducible**: Single command `python rank.py --candidates ... --out ...`  
-✅ **Sandbox**: Streamlit app at `app.py` for small-sample verification  
-
----
-
-## License
-
-MIT License - Built for Redrob Hackathon 2026
+Used Claude (Anthropic) for architectural discussion and debugging, and GitHub Copilot for code autocomplete. All core logic (signal design, honeypot rules, scoring formulas, reasoning templates) was authored and validated by the team. No candidate data was sent to any external API. The ranking pipeline runs fully offline.

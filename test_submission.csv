@@ -1,0 +1,51 @@
+candidate_id,rank,score,reasoning
+CAND_0000031,1,1.0,"Recommendation Systems Engineer at Swiggy (product co) with 6.0 yrs. eval: a/b test, click-through; shipped to production; skills: Embeddings, Pinecone, FAISS. last active 39d ago; response rate 91%; GitHub: 33. Concern: Python not advanced/expert."
+CAND_0000022,2,0.024482,Mechanical Engineer at Hooli (product co) with 1.1 yrs. shipped to production. last active 60d ago; response rate 27%. Concern: 150d notice; outside India; Python not advanced/expert.
+CAND_0000001,3,0.004415,"Backend Engineer at Mindtree (services co) with 6.9 yrs. skills: Milvus, Fine-tuning LLMs. last active 43d ago; response rate 34%; GitHub: 9. Concern: services background; outside India; Python not advanced/expert."
+CAND_0000027,4,0.0,"DevOps Engineer at Infosys (services co) with 3.9 yrs. built rag; shipped to production. last active 56d ago; response rate 58%; GitHub: 39. Concern: 90d notice; services background; non-preferred city, not willing to relocate."
+CAND_0000002,5,1e-06,Operations Manager at Wipro (12.5 yrs); limited signal match for this AI engineering role.
+CAND_0000003,6,1e-06,Customer Support at TCS (1.1 yrs); limited signal match for this AI engineering role.
+CAND_0000004,7,1e-06,Marketing Manager at Dunder Mifflin (3.8 yrs); limited signal match for this AI engineering role.
+CAND_0000005,8,1e-06,Accountant at Stark Industries (11.0 yrs); limited signal match for this AI engineering role.
+CAND_0000006,9,1e-06,Business Analyst at Wayne Enterprises (6.0 yrs); limited signal match for this AI engineering role.
+CAND_0000007,10,1e-06,Civil Engineer at Wipro (5.5 yrs); limited signal match for this AI engineering role.
+CAND_0000008,11,1e-06,Operations Manager at Wipro (3.6 yrs); limited signal match for this AI engineering role.
+CAND_0000009,12,1e-06,Mechanical Engineer at Dunder Mifflin (11.0 yrs); limited signal match for this AI engineering role.
+CAND_0000010,13,1e-06,Data Engineer at Ola (4.6 yrs); limited signal match for this AI engineering role.
+CAND_0000011,14,1e-06,QA Engineer at Pied Piper (2.0 yrs); limited signal match for this AI engineering role.
+CAND_0000012,15,1e-06,Operations Manager at Stark Industries (1.1 yrs); limited signal match for this AI engineering role.
+CAND_0000013,16,1e-06,Civil Engineer at Globex Inc (1.1 yrs); limited signal match for this AI engineering role.
+CAND_0000014,17,1e-06,Frontend Engineer at Zomato (8.4 yrs); limited signal match for this AI engineering role.
+CAND_0000015,18,1e-06,Software Engineer at Razorpay (5.4 yrs); limited signal match for this AI engineering role.
+CAND_0000016,19,1e-06,Accountant at Infosys (5.3 yrs); limited signal match for this AI engineering role.
+CAND_0000017,20,1e-06,Accountant at Wipro (12.3 yrs); limited signal match for this AI engineering role.
+CAND_0000018,21,1e-06,Frontend Engineer at Acme Corp (6.6 yrs); limited signal match for this AI engineering role.
+CAND_0000019,22,1e-06,Project Manager at Wayne Enterprises (6.5 yrs); limited signal match for this AI engineering role.
+CAND_0000020,23,1e-06,Mechanical Engineer at Wipro (6.3 yrs); limited signal match for this AI engineering role.
+CAND_0000021,24,1e-06,Project Manager at Wipro (14.5 yrs); limited signal match for this AI engineering role.
+CAND_0000023,25,1e-06,Software Engineer at Acme Corp (3.7 yrs); limited signal match for this AI engineering role.
+CAND_0000024,26,1e-06,HR Manager at TCS (7.5 yrs); limited signal match for this AI engineering role.
+CAND_0000025,27,1e-06,Frontend Engineer at Tech Mahindra (7.3 yrs); limited signal match for this AI engineering role.
+CAND_0000026,28,1e-06,Graphic Designer at Initech (6.8 yrs); limited signal match for this AI engineering role.
+CAND_0000028,29,1e-06,Operations Manager at Wipro (1.1 yrs); limited signal match for this AI engineering role.
+CAND_0000029,30,1e-06,Business Analyst at Wipro (7.2 yrs); limited signal match for this AI engineering role.
+CAND_0000030,31,1e-06,Marketing Manager at Dunder Mifflin (10.0 yrs); limited signal match for this AI engineering role.
+CAND_0000032,32,1e-06,.NET Developer at Cognizant (8.1 yrs); limited signal match for this AI engineering role.
+CAND_0000033,33,1e-06,Graphic Designer at Wipro (8.6 yrs); limited signal match for this AI engineering role.
+CAND_0000034,34,1e-06,Business Analyst at Wipro (14.5 yrs); limited signal match for this AI engineering role.
+CAND_0000035,35,1e-06,Full Stack Developer at Globex Inc (4.3 yrs); limited signal match for this AI engineering role.
+CAND_0000036,36,1e-06,Project Manager at Initech (11.3 yrs); limited signal match for this AI engineering role.
+CAND_0000037,37,1e-06,Business Analyst at Stark Industries (14.3 yrs); limited signal match for this AI engineering role.
+CAND_0000038,38,1e-06,Java Developer at Swiggy (6.7 yrs); limited signal match for this AI engineering role.
+CAND_0000039,39,1e-06,Marketing Manager at Acme Corp (3.9 yrs); limited signal match for this AI engineering role.
+CAND_0000040,40,1e-06,Customer Support at Globex Inc (1.6 yrs); limited signal match for this AI engineering role.
+CAND_0000041,41,1e-06,Operations Manager at Hooli (13.7 yrs); limited signal match for this AI engineering role.
+CAND_0000042,42,1e-06,HR Manager at Wayne Enterprises (5.0 yrs); limited signal match for this AI engineering role.
+CAND_0000043,43,1e-06,Cloud Engineer at Swiggy (8.3 yrs); limited signal match for this AI engineering role.
+CAND_0000044,44,1e-06,Frontend Engineer at Tech Mahindra (5.7 yrs); limited signal match for this AI engineering role.
+CAND_0000045,45,1e-06,Project Manager at Initech (12.2 yrs); limited signal match for this AI engineering role.
+CAND_0000046,46,1e-06,Mechanical Engineer at Hooli (7.8 yrs); limited signal match for this AI engineering role.
+CAND_0000047,47,1e-06,Project Manager at TCS (2.4 yrs); limited signal match for this AI engineering role.
+CAND_0000048,48,1e-06,Mobile Developer at CRED (9.7 yrs); limited signal match for this AI engineering role.
+CAND_0000049,49,1e-06,Mechanical Engineer at Wayne Enterprises (11.8 yrs); limited signal match for this AI engineering role.
+CAND_0000050,50,1e-06,Business Analyst at Infosys (13.5 yrs); limited signal match for this AI engineering role.

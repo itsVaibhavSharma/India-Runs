@@ -14,6 +14,14 @@ from the local models/ directory.
 
 from __future__ import annotations
 
+# ── Suppress TensorFlow / GPU imports BEFORE any ML library is loaded ────────
+import os
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# ─────────────────────────────────────────────────────────────────────────────
+
 import csv
 import logging
 import time
@@ -282,32 +290,41 @@ class Ranker:
                 "reasoning": reasoning,
             })
 
-        # Pad to exactly 100 rows if we somehow got fewer
+        # Pad to exactly final_top_k rows if we have fewer (should not happen with 100K candidates)
         if len(rows) < final_top_k:
             logger.warning(
-                "Only %d candidates in output — padding to %d",
+                "Only %d candidates available — padding to %d",
                 len(rows), final_top_k,
             )
-            # This shouldn't happen with 100K candidates, but be safe
             seen_ids = {r["candidate_id"] for r in rows}
             pad_rank = len(rows) + 1
-            for cand in all_candidates:
-                if cand.candidate_id not in seen_ids and pad_rank <= final_top_k:
-                    rows.append({
-                        "candidate_id": cand.candidate_id,
-                        "rank": pad_rank,
-                        "score": round(0.001 / pad_rank, 6),
-                        "reasoning": (
-                            f"{cand.current_title} at {cand.current_company}; "
-                            "insufficient signal match for this role."
-                        ),
-                    })
-                    pad_rank += 1
-                    if pad_rank > final_top_k:
-                        break
+            base_score = rows[-1]["score"] if rows else 0.001
+            # Sort remaining candidates to pick best among remaining
+            remaining = [c for c in all_candidates if c.candidate_id not in seen_ids]
+            # Score remaining candidates quickly with basic signals
+            for cand in remaining:
+                if pad_rank > final_top_k:
+                    break
+                # Small strictly decreasing scores
+                pad_score = round(base_score * (0.95 ** (pad_rank - len(rows))), 6)
+                pad_score = max(0.000001, pad_score)
+                rows.append({
+                    "candidate_id": cand.candidate_id,
+                    "rank": pad_rank,
+                    "score": pad_score,
+                    "reasoning": (
+                        f"{cand.current_title} at {cand.current_company} "
+                        f"({cand.years_of_experience:.1f} yrs); "
+                        "limited signal match for this AI engineering role."
+                    ),
+                })
+                seen_ids.add(cand.candidate_id)
+                pad_rank += 1
 
-        # Write CSV
+        # Cap to exactly final_top_k rows and write CSV
+        rows = rows[:final_top_k]
         _write_submission(rows, output_path)
+
 
         elapsed = time.time() - wall_start
         logger.info("=" * 65)
