@@ -335,14 +335,13 @@ class Ranker:
             n_remaining = len(scored_remaining)
             n_needed = min(n_remaining, final_top_k - len(rows))
             if n_needed > 0:
-                # Distribute scores linearly: base_score down to 0.000001
+                # Distribute scores linearly from base_score → 0.000001
+                # Do NOT cap against rows[-1]["score"] here — that score may be 0.0
+                # (candidates that passed gate but scored low after calibration).
+                # The final monotonicity sweep below will correct any remaining issues.
                 step_size = (base_score - 0.000001) / max(n_needed, 1)
                 for idx, (_, _, cand, sig_dict) in enumerate(scored_remaining[:n_needed]):
                     pad_score = round(base_score - (idx + 1) * step_size, 6)
-                    pad_score = max(0.000001, pad_score)
-                    # Safety: ensure strictly <= previous score
-                    if rows:
-                        pad_score = min(pad_score, rows[-1]["score"])
                     pad_score = max(0.000001, pad_score)
 
                     reasoning = generate_reasoning(cand, sig_dict, pad_rank, pad_score, self.jd_requirements)
@@ -356,17 +355,18 @@ class Ranker:
                     seen_ids.add(cand.candidate_id)
                     pad_rank += 1
 
-        # ── Final monotonicity sweep over ALL rows (including padding) ──────
+        # ── Sort by score desc + candidate_id asc (tie-break) ──────────────
+        # Must happen BEFORE the monotonicity sweep so that padded candidates
+        # with positive scores are correctly interleaved above zero-scored
+        # primary candidates (which happens when only a few pass the gate).
+        rows = sorted(rows, key=lambda r: (-r["score"], r["candidate_id"]))
+
+        # ── Monotonicity sweep — enforce non-increasing scores ───────────────
         for i in range(1, len(rows)):
             if rows[i]["score"] > rows[i - 1]["score"]:
                 rows[i]["score"] = rows[i - 1]["score"]
 
-        # ── Enforce tie-break: equal scores → candidate_id ascending ────────
-        # Sort by (score descending, candidate_id ascending) — stable sort preserves
-        # existing order within groups, but re-sorts equal-score candidates by ID.
-        rows = sorted(rows, key=lambda r: (-r["score"], r["candidate_id"]))
-
-        # Re-assign ranks 1..N sequentially after the sort
+        # ── Re-assign ranks 1..N sequentially ───────────────────────────────
         for i, row in enumerate(rows, start=1):
             row["rank"] = i
 
