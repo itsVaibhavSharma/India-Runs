@@ -1,184 +1,192 @@
-"""Reasoning Generator - Creates specific, factual, JD-connected reasoning for each candidate."""
+"""Reasoning Generator - Creates specific, factual reasoning for each ranked candidate."""
 
 from typing import Dict, List, Any
 from datetime import datetime
-import re
+
+
+SERVICE_INDUSTRIES = {
+    'it services', 'consulting', 'outsourcing', 'system integrator',
+    'managed services', 'professional services', 'staffing'
+}
+
+CONSULTING_FIRMS = {
+    'tcs', 'infosys', 'wipro', 'cognizant', 'capgemini', 'accenture',
+    'hcl', 'tech mahindra', 'lti', 'mindtree', 'mphasis', 'hexaware',
+    'l&t infotech', 'zensar', 'ntt data', 'cgi', 'virtusa', 'synechron'
+}
+
+REQUIRED_TECH_KEYWORDS = {
+    'embeddings', 'vector search', 'rag', 'retrieval', 'ranking',
+    'sentence-transformers', 'bge', 'e5', 'faiss', 'pinecone', 'weaviate',
+    'qdrant', 'milvus', 'opensearch', 'elasticsearch', 'hybrid search',
+    'semantic search', 'dense retrieval', 'sparse retrieval', 'bm25',
+    'learning to rank', 'ltr', 'ndcg', 'mrr', 'map', 'a/b testing',
+    'python', 'production', 'deployed', 'shipped', 'scale', 'real users'
+}
+
+NICE_TECH_KEYWORDS = {
+    'lora', 'qlora', 'peft', 'fine-tuning', 'xgboost', 'lightgbm',
+    'catboost', 'lambdamart', 'listnet', 'ranklib', 'hr tech',
+    'recruiting', 'marketplace', 'distributed systems', 'inference optimization'
+}
 
 
 class ReasoningGenerator:
-    TECH_KEYWORDS = {
-        'embeddings', 'vector search', 'rag', 'retrieval', 'ranking', 'faiss', 'pinecone',
-        'weaviate', 'qdrant', 'milvus', 'opensearch', 'elasticsearch', 'sentence-transformers',
-        'bge', 'e5', 'hybrid search', 'semantic search', 'bm25', 'learning to rank',
-        'ndcg', 'mrr', 'map', 'xgboost', 'lightgbm', 'lambdamart', 'lora', 'qlora', 'peft',
-        'fine-tuning', 'python', 'production', 'deployed', 'shipped', 'scale', 'mlops'
-    }
-
-    SERVICE_INDUSTRIES = {
-        'it services', 'consulting', 'outsourcing', 'system integrator'
-    }
-
-    SERVICE_FIRMS = {
-        'tcs', 'infosys', 'wipro', 'cognizant', 'capgemini', 'accenture',
-        'hcl', 'tech mahindra', 'lti', 'mindtree', 'mphasis', 'hexaware'
-    }
-
-    def __init__(self, jd_requirements=None):
-        self.jd_requirements = jd_requirements
+    def __init__(self):
+        pass
 
     def generate(self, candidate, signals: Dict[str, float], rank: int, score: float) -> str:
         parts = []
 
-        # 1. Title/Company/Experience
+        # 1. Title/Company/Experience fact
         p = candidate.profile
-        company_type = self._get_company_type(p.current_company, p.current_industry)
-        parts.append(f"{p.current_title} at {p.current_company} ({company_type}) with {p.years_of_experience:.1f} yrs")
+        company_type = "services" if self._is_service_company(p.get('current_company', '')) else "product"
+        parts.append(
+            f"{p.get('current_title', 'N/A')} at {p.get('current_company', 'N/A')} "
+            f"({company_type}) with {p.get('years_of_experience', 0):.1f} yrs"
+        )
 
-        # 2. Technical evidence from career
+        # 2. Technical evidence from career descriptions
         tech_evidence = self._extract_tech_evidence(candidate)
         if tech_evidence:
             parts.append(tech_evidence)
 
-        # 3. Key skill matches
-        skill_evidence = self._extract_skill_evidence(candidate)
-        if skill_evidence:
-            parts.append(skill_evidence)
-
-        # 4. Behavioral signals
-        behavioral = self._extract_behavioral_evidence(candidate)
+        # 3. Behavioral signals
+        behavioral = self._format_behavioral(candidate.redrob_signals)
         if behavioral:
             parts.append(behavioral)
 
-        # 5. Concerns/gaps (honest)
-        concerns = self._extract_concerns(candidate)
+        # 4. Honest concerns
+        concerns = self._format_concerns(candidate, signals)
         if concerns:
             parts.append(f"Concern: {concerns}")
 
         reasoning = ". ".join(parts) + "."
-
-        # Ensure length is reasonable (1-2 sentences as per spec)
-        if len(reasoning) > 300:
-            reasoning = self._trim_reasoning(reasoning)
-
         return reasoning
-
-    def _get_company_type(self, company: str, industry: str) -> str:
-        company_lower = company.lower()
-        industry_lower = industry.lower()
-
-        if any(firm in company_lower for firm in self.SERVICE_FIRMS):
-            return 'services'
-        if any(svc in industry_lower for svc in self.SERVICE_INDUSTRIES):
-            return 'services'
-        return 'product'
 
     def _extract_tech_evidence(self, candidate) -> str:
         evidence = []
+
+        # Check career descriptions for required tech
         for career in candidate.career_history:
             desc = career.description.lower()
             found = []
-            for kw in self.TECH_KEYWORDS:
+
+            for kw in REQUIRED_TECH_KEYWORDS:
                 if kw in desc:
                     found.append(kw)
+
+            for kw in NICE_TECH_KEYWORDS:
+                if kw in desc:
+                    found.append(kw)
+
             if found:
-                # Deduplicate and limit
+                # Deduplicate and take top 4
                 unique = list(dict.fromkeys(found))[:4]
-                evidence.append(f"built {', '.join(unique)}")
-                break  # Only most recent relevant role
+                evidence.append(f"built {', '.join(unique)} at {career.company}")
 
-        if evidence:
-            return "; ".join(evidence)
-        return ""
-
-    def _extract_skill_evidence(self, candidate) -> str:
-        matched = []
+        # Check skills for required tech
+        skill_evidence = []
         for skill in candidate.skills:
-            skill_lower = skill.name.lower()
-            if skill_lower in self.TECH_KEYWORDS and skill.endorsements > 0:
-                trust = "high" if skill.endorsements > 10 and skill.duration_months > 12 else "moderate"
-                matched.append(f"{skill.name} ({trust} trust)")
+            name = skill.name.lower()
+            if name in REQUIRED_TECH_KEYWORDS and skill.endorsements > 0:
+                skill_evidence.append(f"{skill.name} ({skill.endorsements} endorsements, {skill.duration_months}mo)")
+            elif name in NICE_TECH_KEYWORDS and skill.endorsements > 0:
+                skill_evidence.append(f"{skill.name} ({skill.endorsements} endorsements)")
 
-        if matched:
-            return f"skills: {', '.join(matched[:5])}"
-        return ""
+        if skill_evidence:
+            evidence.append(f"skills: {', '.join(skill_evidence[:3])}")
 
-    def _extract_behavioral_evidence(self, candidate) -> str:
-        s = candidate.redrob_signals
+        # GitHub activity
+        if candidate.redrob_signals.github_activity_score > 0:
+            evidence.append(f"GitHub activity {candidate.redrob_signals.github_activity_score:.0f}")
+
+        # Skill assessments
+        assessments = candidate.redrob_signals.skill_assessment_scores
+        if assessments:
+            top_assess = sorted(assessments.items(), key=lambda x: x[1], reverse=True)[:2]
+            evidence.append(f"assessments: {', '.join(f'{k} {v:.0f}' for k, v in top_assess)}")
+
+        return "; ".join(evidence[:3]) if evidence else ""
+
+    def _format_behavioral(self, signals) -> str:
         parts = []
 
-        if s.last_active_date:
-            try:
-                last = datetime.fromisoformat(s.last_active_date)
-                days = (datetime.now() - last).days
-                if days < 7:
-                    parts.append("very recent activity")
-                elif days < 30:
-                    parts.append(f"active {days}d ago")
-                elif days < 60:
-                    parts.append(f"last active {days}d ago")
-            except:
-                pass
+        # Recency
+        try:
+            last_active = datetime.fromisoformat(signals.last_active_date)
+            days_ago = (datetime.now() - last_active).days
+            if days_ago <= 7:
+                parts.append(f"active {days_ago}d ago")
+            elif days_ago <= 30:
+                parts.append(f"active {days_ago}d ago")
+            else:
+                parts.append(f"last active {days_ago}d ago")
+        except (ValueError, TypeError):
+            pass
 
-        if s.recruiter_response_rate > 0:
-            rate = s.recruiter_response_rate
-            if rate > 0.5:
-                parts.append(f"high response rate ({rate:.0%})")
-            elif rate > 0.2:
-                parts.append(f"moderate response rate ({rate:.0%})")
+        # Response rate
+        if signals.recruiter_response_rate > 0:
+            parts.append(f"response rate {signals.recruiter_response_rate:.0%}")
 
-        if s.github_activity_score > 20:
-            parts.append(f"GitHub activity ({s.github_activity_score:.0f})")
-        elif s.github_activity_score > 0:
-            parts.append("some GitHub activity")
+        # Recruiter interest
+        if signals.saved_by_recruiters_30d > 0:
+            parts.append(f"saved by {signals.saved_by_recruiters_30d} recruiters (30d)")
 
-        if s.saved_by_recruiters_30d > 5:
-            parts.append(f"saved by {s.saved_by_recruiters_30d} recruiters")
+        # Interview completion
+        if signals.interview_completion_rate > 0:
+            parts.append(f"interview completion {signals.interview_completion_rate:.0%}")
+
+        # Open to work
+        if signals.open_to_work_flag:
+            parts.append("open to work")
 
         return "; ".join(parts) if parts else ""
 
-    def _extract_concerns(self, candidate) -> str:
+    def _format_concerns(self, candidate, signals: Dict[str, float]) -> str:
         concerns = []
-        s = candidate.redrob_signals
-        p = candidate.profile
 
-        if s.notice_period_days > 60:
-            concerns.append(f"{s.notice_period_days}-day notice")
+        # Notice period
+        if candidate.redrob_signals.notice_period_days > 60:
+            concerns.append(f"{candidate.redrob_signals.notice_period_days}-day notice")
 
-        if self._get_company_type(p.current_company, p.current_industry) == 'services':
+        # Services background
+        if self._is_service_company(candidate.profile.get('current_company', '')):
             concerns.append("services background")
 
-        python_skill = next((sk for sk in candidate.skills if 'python' in sk.name.lower()), None)
+        # Location mismatch
+        loc = candidate.profile.get('location', '').lower()
+        preferred = ['pune', 'noida', 'hyderabad', 'mumbai', 'delhi', 'gurgaon', 'bangalore', 'chennai']
+        if not any(p in loc for p in preferred) and not candidate.redrob_signals.willing_to_relocate:
+            concerns.append("location mismatch")
+
+        # Python proficiency
+        python_skill = next((s for s in candidate.skills if s.name.lower() == 'python'), None)
         if not python_skill or python_skill.proficiency not in ('advanced', 'expert'):
             concerns.append("Python not advanced")
 
-        if p.years_of_experience < 4:
-            concerns.append("junior for role")
+        # Honeypot penalty
+        if signals.get('honeypot_penalty', 0) > 0.3:
+            concerns.append("profile anomalies detected")
 
-        if s.recruiter_response_rate < 0.15:
-            concerns.append("low recruiter response")
+        # Low behavioral score
+        if signals.get('behavioral', 1) < 0.3:
+            concerns.append("low engagement signals")
 
-        if s.github_activity_score == -1:
-            concerns.append("no GitHub linked")
-
-        # Check for required tech in career
-        has_required_tech = False
-        for career in candidate.career_history:
-            desc = career.description.lower()
-            if any(kw in desc for kw in ['embedding', 'vector', 'faiss', 'pinecone', 'retrieval', 'ranking', 'rag']):
-                has_required_tech = True
-                break
-        if not has_required_tech:
-            concerns.append("no embedding/retrieval production evidence")
+        # Inactive
+        try:
+            last_active = datetime.fromisoformat(candidate.redrob_signals.last_active_date)
+            if (datetime.now() - last_active).days > 60:
+                concerns.append("inactive >60d")
+        except (ValueError, TypeError):
+            pass
 
         return "; ".join(concerns) if concerns else ""
 
-    def _trim_reasoning(self, reasoning: str) -> str:
-        sentences = re.split(r'\.\s+', reasoning)
-        if len(sentences) > 2:
-            return ". ".join(sentences[:2]) + "."
-        return reasoning
+    def _is_service_company(self, company: str) -> bool:
+        company_lower = company.lower()
+        return any(firm in company_lower for firm in CONSULTING_FIRMS)
 
-
-def generate_reasoning(candidate, signals, rank, score, jd_requirements=None) -> str:
-    generator = ReasoningGenerator(jd_requirements)
-    return generator.generate(candidate, signals, rank, score)
+    def _is_service_industry(self, industry: str) -> bool:
+        industry_lower = industry.lower()
+        return any(svc in industry_lower for svc in SERVICE_INDUSTRIES)
