@@ -256,8 +256,45 @@ class CandidateLoader:
         return open(self.candidates_path, "r", encoding="utf-8")
 
     def load_candidates(self) -> Iterator[Candidate]:
-        """Stream candidates one at a time (memory-efficient)."""
+        """Stream candidates one at a time (memory-efficient).
+
+        Handles both JSONL (one JSON object per line) and JSON array files.
+        Supports both .jsonl and .jsonl.gz (gzip) formats.
+        """
+        is_gz = self.candidates_path.suffix == ".gz"
+
         with self._open_file() as f:
+            if is_gz:
+                # Gzip files are not seekable; always assume JSONL
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        yield self._parse_candidate(data)
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                        logger.warning("Skipping line %d: %s", line_num, exc)
+                return
+
+            # Plain file: detect JSON array vs JSONL by peeking first character
+            first_char = f.read(1)
+            f.seek(0)
+
+            if first_char == "[":
+                # JSON array format (e.g. sample_candidates.json)
+                try:
+                    data_list = json.load(f)
+                    for data in data_list:
+                        try:
+                            yield self._parse_candidate(data)
+                        except (KeyError, TypeError, ValueError) as exc:
+                            logger.warning("Skipping candidate: %s", exc)
+                except json.JSONDecodeError as exc:
+                    logger.error("Failed to parse JSON array: %s", exc)
+                return
+
+            # JSONL format (one JSON object per line)
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
@@ -273,10 +310,19 @@ class CandidateLoader:
         return list(self.load_candidates())
 
     def count_candidates(self) -> int:
-        """Count lines without parsing."""
-        count = 0
+        """Count candidates without full parsing."""
         with self._open_file() as f:
+            first_char = f.read(1)
+            f.seek(0)
+            if first_char == "[":
+                try:
+                    data = json.load(f)
+                    return len(data)
+                except Exception:
+                    return 0
+            # JSONL
+            count = 0
             for line in f:
-                if line.strip():
+                if line.strip() and not line.strip().startswith("#"):
                     count += 1
-        return count
+            return count
