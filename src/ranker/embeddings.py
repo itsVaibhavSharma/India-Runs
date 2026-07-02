@@ -157,26 +157,27 @@ class EmbeddingManager:
                     if career.description:
                         parts.append(career.description)
                 text = " ".join(parts)
-            texts.append(text[:4096])   # cap length for memory safety
+            texts.append(text[:2048])   # cap length; 2048 is plenty for signal
             ids.append(c.candidate_id)
 
-        # Batch encode
-        batch_size = 256
+        # Batch encode — large outer batch for memory efficiency,
+        # large inner batch_size for throughput on CPU
+        outer_batch = 5000   # process 5K at a time to show progress
+        inner_batch = 256    # sentence-transformers encode batch size
         all_embeddings: List[np.ndarray] = []
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
+
+        for i in range(0, len(texts), outer_batch):
+            batch = texts[i : i + outer_batch]
             batch_embs = self._model.encode(
                 batch,
                 convert_to_numpy=True,
                 normalize_embeddings=True,
-                show_progress_bar=True,
-                batch_size=64,
+                show_progress_bar=False,
+                batch_size=inner_batch,
             )
             all_embeddings.append(batch_embs.astype(np.float32))
-            logger.info(
-                "  Encoded %d / %d candidates...",
-                min(i + batch_size, len(texts)), len(texts),
-            )
+            done = min(i + outer_batch, len(texts))
+            logger.info("  Encoded %d / %d candidates (%.0f%%)…", done, len(texts), done / len(texts) * 100)
 
         embeddings = np.vstack(all_embeddings).astype(np.float32)
 
