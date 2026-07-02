@@ -600,9 +600,11 @@ class SignalExtractor:
         score += min(1.0, signals.profile_views_received_30d / 50.0) * 0.12
 
         # GitHub activity — key proxy for "writes code" (12% weight)
+        # Note: -1 means no GitHub profile linked (neutral — not a penalty)
         gh = signals.github_activity_score
-        if gh >= 0:
+        if gh > 0:
             score += min(1.0, gh / 50.0) * 0.12
+        # gh == -1: no GitHub linked — neutral, no bonus no penalty
 
         # Interview completion rate (10% weight)
         score += signals.interview_completion_rate * 0.10

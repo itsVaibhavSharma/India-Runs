@@ -1,29 +1,33 @@
-# Core ML / numeric
+# ============================================================
+# Redrob Ranker — Python Dependencies
+# Team: ThreeTwoOne | Vaibhav Sharma & Shreya Khantal
+# ============================================================
+
+# Core numeric / ML
 numpy>=1.26.0,<2.0
 scikit-learn>=1.4.0,<2.0
 
-# Sentence Transformers (CPU-only torch bundled)
-# Using CPU-only torch to keep image size small
+# Sentence Transformers — CPU-only to keep image small
+# Use CPU-only torch; no CUDA required (competition constraint)
 torch==2.2.2+cpu --index-url https://download.pytorch.org/whl/cpu
 sentence-transformers==3.0.1
-transformers>=4.40.0
+transformers>=4.40.0,<5.0
 tokenizers>=0.19.0
 huggingface-hub>=0.23.0
 
-# Data
+# Data processing
 pandas>=2.1.0
-
-# Progress & utilities
 tqdm>=4.66.0
 
 # File formats
 python-docx>=1.1.0
 PyYAML>=6.0.1
 
-# Streamlit (for the demo app)
-streamlit>=1.30.0
+# Streamlit demo / deployment
+streamlit>=1.35.0
 plotly>=5.20.0
 altair>=5.0.0
 
-# Fast JSON (optional but speeds up JSONL parsing)
-ujson>=5.9.0; platform_system != "Windows" or python_version >= "3.11"
+# Fast JSON (optional but speeds up JSONL parsing significantly)
+# ujson has no Windows wheel for older Python; only install if available
+ujson>=5.9.0; python_version >= "3.11"

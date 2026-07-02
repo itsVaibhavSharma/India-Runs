@@ -2,7 +2,7 @@
 Team: ThreeTwoOne | Vaibhav Sharma & Shreya Khantal
 
 Run locally:  streamlit run app.py
-Deploy:       streamlit cloud (connects to this GitHub repo)
+Deploy:       Streamlit Cloud (connects to GitHub repo)
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ sys.path.insert(0, str(_HERE / "src"))
 
 # Suppress TF/transformers noise in the UI
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
@@ -156,6 +159,13 @@ section[data-testid="stSidebar"] {
     unsafe_allow_html=True,
 )
 
+# ── JD path resolution ───────────────────────────────────────────────────────
+# Prefer the bundled markdown JD (works on Streamlit Cloud without extra deps)
+_DEFAULT_JD = _HERE / "data" / "job_description.md"
+if not _DEFAULT_JD.exists():
+    # Fallback: look for docx in parent Dataset folder (local dev)
+    _DEFAULT_JD = _HERE.parent / "Dataset" / "job_description.docx"
+
 # ── Hero section ────────────────────────────────────────────────────────────
 col_logo, col_title = st.columns([1, 9])
 with col_logo:
@@ -172,10 +182,10 @@ with col_title:
 with st.sidebar:
     st.markdown("### ⚙️ Configuration")
 
-    jd_path = st.text_input(
+    jd_path_input = st.text_input(
         "Job Description Path",
-        value=str(_HERE.parent / "Dataset" / "job_description.docx"),
-        help="Path to the .docx or .md JD file",
+        value=str(_DEFAULT_JD),
+        help="Path to the .docx or .md JD file. On Streamlit Cloud, uses the bundled data/job_description.md",
     )
     cache_dir = st.text_input(
         "Cache Directory",
@@ -184,12 +194,12 @@ with st.sidebar:
     )
     stage1_k = st.slider(
         "Stage-1 Candidates (semantic filter)",
-        min_value=100, max_value=2000, value=500, step=100,
+        min_value=50, max_value=2000, value=500, step=50,
     )
     force_recompute = st.checkbox(
         "Force Recompute Embeddings",
         value=False,
-        help="Ignore cached embeddings and recompute (slow)",
+        help="Ignore cached embeddings and recompute (slow for large files)",
     )
 
     st.divider()
@@ -201,8 +211,8 @@ with st.sidebar:
     )
 
 # ── Main area ────────────────────────────────────────────────────────────────
-tab_run, tab_about, tab_signals = st.tabs(
-    ["🚀 Run Ranker", "📖 About the Pipeline", "📊 Signal Details"]
+tab_run, tab_demo, tab_about, tab_signals = st.tabs(
+    ["🚀 Run Ranker", "🎬 Quick Demo", "📖 About the Pipeline", "📊 Signal Details"]
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,7 +223,7 @@ with tab_run:
     st.markdown(
         '<div class="card">Upload a <code>.jsonl</code>, <code>.json</code>, or '
         '<code>.jsonl.gz</code> file. For the Streamlit demo, a sample of ≤1000 '
-        'candidates works best. The full 100K run is meant for local execution.</div>',
+        'candidates works best. The full 100K run is designed for local execution.</div>',
         unsafe_allow_html=True,
     )
 
@@ -224,11 +234,20 @@ with tab_run:
     )
 
     if not uploaded:
-        st.info("👆 Upload a candidates file to start. You can use **sample_candidates.json** from the Dataset folder for a quick demo.")
+        st.info(
+            "👆 Upload a candidates file to start ranking. "
+            "You can use **sample_candidates.json** from the Dataset folder for a quick demo, "
+            "or switch to the **🎬 Quick Demo** tab to run with pre-loaded sample data."
+        )
 
     else:
         # ── Save upload to temp file ────────────────────────────────────────
-        suffix = "." + uploaded.name.split(".")[-1]
+        name = uploaded.name
+        # Determine suffix (handle .jsonl.gz double extension)
+        if name.endswith(".jsonl.gz"):
+            suffix = ".jsonl.gz"
+        else:
+            suffix = "." + name.split(".")[-1]
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         tmp.write(uploaded.read())
         tmp.flush()
@@ -241,17 +260,26 @@ with tab_run:
         with st.expander("🔍 Preview first 5 candidates"):
             try:
                 if tmp_path.endswith(".gz"):
-                    opener = lambda: gzip.open(tmp_path, "rt", encoding="utf-8")
+                    with gzip.open(tmp_path, "rt", encoding="utf-8") as f:
+                        lines = []
+                        for i, line in enumerate(f):
+                            if i >= 5:
+                                break
+                            lines.append(json.loads(line))
+                        raw = lines
                 else:
-                    opener = lambda: open(tmp_path, "r", encoding="utf-8")
-
-                with opener() as f:
-                    first = f.read(1)
-                    f.seek(0)
-                    if first == "[":
-                        raw = json.load(f)[:5]
-                    else:
-                        raw = [json.loads(next(f)) for _ in range(min(5, sum(1 for _ in open(tmp_path))))]
+                    with open(tmp_path, "r", encoding="utf-8") as f:
+                        first = f.read(1)
+                        f.seek(0)
+                        if first == "[":
+                            raw = json.load(f)[:5]
+                        else:
+                            raw = []
+                            for i, line in enumerate(f):
+                                if i >= 5:
+                                    break
+                                if line.strip():
+                                    raw.append(json.loads(line))
 
                 for item in raw:
                     p = item.get("profile", {})
@@ -272,120 +300,158 @@ with tab_run:
                 st.warning(f"Preview failed: {exc}")
 
         # ── Run Ranking ──────────────────────────────────────────────────────
-        col_btn1, col_btn2 = st.columns([3, 1])
-        with col_btn1:
-            run_btn = st.button("🚀 Run Ranking Pipeline", type="primary", use_container_width=True)
-        with col_btn2:
-            st.markdown("")   # spacer
+        run_btn = st.button("🚀 Run Ranking Pipeline", type="primary", use_container_width=True)
 
         if run_btn:
-            out_path = str(_HERE / "submission_output.csv")
-            progress = st.progress(0, text="Initialising pipeline…")
-            status = st.empty()
-            log_box = st.empty()
-
+            _run_ranking_ui(tmp_path, jd_path_input, cache_dir, stage1_k, force_recompute)
             try:
-                from ranker.__main__ import Ranker
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
-                start = time.time()
 
-                # Check JD
-                if not Path(jd_path).exists():
-                    st.error(f"JD file not found: {jd_path}")
-                    st.stop()
+def _run_ranking_ui(candidates_path: str, jd_path: str, cache_dir: str,
+                    stage1_k: int, force_recompute: bool) -> None:
+    """Run the full ranking pipeline and display results in Streamlit."""
+    out_path = str(_HERE / "submission_output.csv")
+    progress = st.progress(0, text="Initialising pipeline…")
+    status = st.empty()
 
-                status.info("⚙️ Parsing job description…")
-                progress.progress(5, text="Parsing JD…")
+    try:
+        from ranker.__main__ import Ranker
 
-                ranker = Ranker(jd_path=jd_path, candidates_path=tmp_path, cache_dir=cache_dir)
+        start = time.time()
 
-                status.info("📐 Extracting candidate signals & embeddings…")
-                progress.progress(20, text="Loading candidates and extracting signals…")
+        if not Path(jd_path).exists():
+            st.error(f"❌ JD file not found: {jd_path}")
+            st.info("Tip: Check the 'Job Description Path' in the sidebar. On Streamlit Cloud, the bundled `data/job_description.md` is used automatically.")
+            return
 
-                ranker.run(
-                    output_path=out_path,
-                    force_recompute=force_recompute,
-                    final_top_k=100,
-                    stage1_top_k=stage1_k,
-                )
+        status.info("⚙️ Parsing job description…")
+        progress.progress(5, text="Parsing JD…")
 
-                progress.progress(100, text="Done!")
-                elapsed = time.time() - start
-                status.success(f"✅ Ranking complete in **{elapsed:.1f}s** ({elapsed/60:.1f} min)")
+        ranker = Ranker(jd_path=jd_path, candidates_path=candidates_path, cache_dir=cache_dir)
 
-            except Exception as exc:
-                import traceback
-                status.error(f"❌ Ranking failed: {exc}")
-                with st.expander("Error details"):
-                    st.code(traceback.format_exc())
-                st.stop()
+        status.info("📐 Extracting candidate signals & embeddings…")
+        progress.progress(20, text="Loading candidates and extracting signals…")
 
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
+        ranker.run(
+            output_path=out_path,
+            force_recompute=force_recompute,
+            final_top_k=100,
+            stage1_top_k=stage1_k,
+        )
 
-            # ── Display results ──────────────────────────────────────────────
-            if Path(out_path).exists():
-                df = pd.read_csv(out_path)
-                st.markdown(f"### 🏆 Top {len(df)} Ranked Candidates")
+        progress.progress(100, text="Done!")
+        elapsed = time.time() - start
+        status.success(f"✅ Ranking complete in **{elapsed:.1f}s** ({elapsed/60:.1f} min)")
 
-                # KPI metrics
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Top Score", f"{df['score'].max():.4f}")
-                m2.metric("Bottom Score", f"{df['score'].min():.4f}")
-                m3.metric("Score Range", f"{df['score'].max() - df['score'].min():.4f}")
-                m4.metric("Candidates Ranked", len(df))
+    except Exception as exc:
+        import traceback
+        status.error(f"❌ Ranking failed: {exc}")
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
+        return
 
-                # Top-10 cards
-                st.markdown("#### 🥇 Top 10 Candidates")
-                for _, row in df.head(10).iterrows():
-                    bar_pct = int(row["score"] * 100)
-                    st.markdown(
-                        f'<div class="top-cand">'
-                        f'<span class="rank-badge">#{int(row["rank"])}</span> '
-                        f'<strong>{row["candidate_id"]}</strong> — '
-                        f'Score: <strong>{row["score"]:.4f}</strong>'
-                        f'<div class="score-bar-outer"><div class="score-bar-inner" style="width:{bar_pct}%"></div></div>'
-                        f'<p style="color:#cbd5e1;font-size:0.82rem;margin:0.4rem 0 0 0">{row["reasoning"]}</p>'
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+    # ── Display results ──────────────────────────────────────────────────────
+    if Path(out_path).exists():
+        df = pd.read_csv(out_path)
+        _display_results(df)
 
-                # Full table
-                st.markdown("#### 📋 Full Rankings Table")
-                display_df = df.copy()
-                display_df["score"] = display_df["score"].apply(lambda x: f"{x:.6f}")
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "candidate_id": st.column_config.TextColumn("Candidate ID", width="medium"),
-                        "rank": st.column_config.NumberColumn("Rank", width="small"),
-                        "score": st.column_config.TextColumn("Score", width="small"),
-                        "reasoning": st.column_config.TextColumn("Reasoning", width="large"),
-                    },
-                )
 
-                # Score distribution chart
-                st.markdown("#### 📈 Score Distribution")
-                score_df = df[["rank", "score"]].copy()
-                st.line_chart(score_df.set_index("rank")["score"])
+def _display_results(df: pd.DataFrame) -> None:
+    """Render the ranking results to the Streamlit UI."""
+    st.markdown(f"### 🏆 Top {len(df)} Ranked Candidates")
 
-                # Download
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="📥 Download submission.csv",
-                    data=csv_bytes,
-                    file_name="submission.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+    # KPI metrics
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Top Score", f"{df['score'].max():.4f}")
+    m2.metric("Bottom Score", f"{df['score'].min():.4f}")
+    m3.metric("Score Range", f"{df['score'].max() - df['score'].min():.4f}")
+    m4.metric("Candidates Ranked", len(df))
+
+    # Top-10 cards
+    st.markdown("#### 🥇 Top 10 Candidates")
+    for _, row in df.head(10).iterrows():
+        bar_pct = int(row["score"] * 100)
+        st.markdown(
+            f'<div class="top-cand">'
+            f'<span class="rank-badge">#{int(row["rank"])}</span> '
+            f'<strong>{row["candidate_id"]}</strong> — '
+            f'Score: <strong>{row["score"]:.4f}</strong>'
+            f'<div class="score-bar-outer"><div class="score-bar-inner" style="width:{bar_pct}%"></div></div>'
+            f'<p style="color:#cbd5e1;font-size:0.82rem;margin:0.4rem 0 0 0">{row["reasoning"]}</p>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Full table
+    st.markdown("#### 📋 Full Rankings Table")
+    display_df = df.copy()
+    display_df["score"] = display_df["score"].apply(lambda x: f"{x:.6f}")
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "candidate_id": st.column_config.TextColumn("Candidate ID", width="medium"),
+            "rank": st.column_config.NumberColumn("Rank", width="small"),
+            "score": st.column_config.TextColumn("Score", width="small"),
+            "reasoning": st.column_config.TextColumn("Reasoning", width="large"),
+        },
+    )
+
+    # Score distribution chart
+    st.markdown("#### 📈 Score Distribution")
+    score_df = df[["rank", "score"]].copy()
+    st.line_chart(score_df.set_index("rank")["score"])
+
+    # Download
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Download submission.csv",
+        data=csv_bytes,
+        file_name="submission.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2: About the Pipeline
+# TAB 2: Quick Demo (pre-loaded sample data)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_demo:
+    st.markdown("### 🎬 Quick Demo — Pre-loaded Sample Candidates")
+    st.markdown(
+        '<div class="card">'
+        'This demo runs the full ranking pipeline on the <strong>50 sample candidates</strong> '
+        'bundled with the repository. No file upload required — just click Run!'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    sample_path = _HERE / "data" / "sample_candidates.json"
+    if not sample_path.exists():
+        st.warning(
+            "Sample data not found at `data/sample_candidates.json`. "
+            "Please upload a file in the **🚀 Run Ranker** tab instead."
+        )
+    else:
+        st.info(f"📊 Sample file: `{sample_path.name}` — 50 candidates")
+
+        demo_btn = st.button("▶️ Run Demo Pipeline", type="primary", use_container_width=True)
+        if demo_btn:
+            _run_ranking_ui(
+                str(sample_path),
+                jd_path_input,
+                cache_dir,
+                stage1_k,
+                force_recompute,
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3: About the Pipeline
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_about:
     st.markdown("## 🧠 Pipeline Architecture")
@@ -457,8 +523,22 @@ with tab_about:
 """
     )
 
+    st.markdown("## ⏱️ Runtime Profile")
+    st.markdown(
+        """
+| Stage | Time | Memory |
+|-------|------|--------|
+| Load 100K JSONL | ~30s | ~500 MB |
+| Signal extraction | ~90s | ~800 MB |
+| Embedding similarity | ~30s | ~200 MB |
+| Fusion + calibration | ~10s | ~50 MB |
+| Reasoning generation | ~20s | ~100 MB |
+| **TOTAL** | **~3 min** | **< 2 GB** |
+"""
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3: Signal Details
+# TAB 4: Signal Details
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_signals:
     st.markdown("## 📊 Signal Breakdown Explorer")
@@ -540,7 +620,7 @@ with tab_signals:
 
     cand_json_str = st.text_area("Candidate JSON", value=sample_json, height=300)
 
-    if st.button("🔬 Analyse Signals"):
+    if st.button("🔬 Analyse Signals", key="analyse_btn"):
         try:
             from ranker.candidate_loader import CandidateLoader
             from ranker.signals import SignalExtractor
@@ -554,8 +634,9 @@ with tab_signals:
             candidate = loader._parse_candidate(cand_data)
 
             req = None
-            if Path(jd_path).exists():
-                req = parse_jd(jd_path)
+            jd_p = Path(jd_path_input)
+            if jd_p.exists():
+                req = parse_jd(str(jd_p))
 
             extractor = SignalExtractor(req)
             scores = extractor.extract_all_signals(candidate)

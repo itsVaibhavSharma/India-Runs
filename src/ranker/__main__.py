@@ -293,30 +293,55 @@ class Ranker:
         # Pad to exactly final_top_k rows if we have fewer (should not happen with 100K candidates)
         if len(rows) < final_top_k:
             logger.warning(
-                "Only %d candidates available — padding to %d",
+                "Only %d candidates available — padding to %d with best remaining candidates",
                 len(rows), final_top_k,
             )
             seen_ids = {r["candidate_id"] for r in rows}
             pad_rank = len(rows) + 1
-            base_score = rows[-1]["score"] if rows else 0.001
-            # Sort remaining candidates to pick best among remaining
+
+            # Ensure last score is available for stepping
+            base_score = rows[-1]["score"] if rows else 0.050
+
+            # Build a quick score for ALL remaining candidates using signal extraction
             remaining = [c for c in all_candidates if c.candidate_id not in seen_ids]
-            # Score remaining candidates quickly with basic signals
+
+            # Quick-score remaining candidates by basic signal composite
+            scored_remaining = []
             for cand in remaining:
+                try:
+                    sig: SignalScores = signal_extractor.extract_all_signals(cand)
+                    quick = (
+                        sig.title_career * 0.30 +
+                        sig.skill_depth   * 0.25 +
+                        sig.experience    * 0.20 +
+                        sig.education     * 0.10 +
+                        sig.location      * 0.05 +
+                        sig.behavioral    * 0.10 -
+                        sig.honeypot_penalty * 0.15
+                    )
+                    scored_remaining.append((quick, cand, sig.to_dict()))
+                except Exception:
+                    scored_remaining.append((0.0, cand, {}))
+
+            # Sort by descending quick score
+            scored_remaining.sort(key=lambda x: -x[0])
+
+            for quick_score, cand, sig_dict in scored_remaining:
                 if pad_rank > final_top_k:
                     break
-                # Small strictly decreasing scores
-                pad_score = round(base_score * (0.95 ** (pad_rank - len(rows))), 6)
+
+                # Ensure score is monotonically decreasing from last row
+                step = (pad_rank - len(rows))
+                pad_score = round(base_score * max(0.90 ** step, 0.0001), 6)
                 pad_score = max(0.000001, pad_score)
+
+                reasoning = generate_reasoning(cand, sig_dict, pad_rank, pad_score, self.jd_requirements)
+
                 rows.append({
                     "candidate_id": cand.candidate_id,
                     "rank": pad_rank,
                     "score": pad_score,
-                    "reasoning": (
-                        f"{cand.current_title} at {cand.current_company} "
-                        f"({cand.years_of_experience:.1f} yrs); "
-                        "limited signal match for this AI engineering role."
-                    ),
+                    "reasoning": reasoning,
                 })
                 seen_ids.add(cand.candidate_id)
                 pad_rank += 1
